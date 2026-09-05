@@ -81,10 +81,7 @@ initialize_file(Path) ->
         ok ->
             case erlite_sqlite:open(Path) of
                 {ok, Connection} ->
-                    case erlite_sqlite:close(Connection) of
-                        ok -> ok;
-                        {error, Reason} -> {error, {close_failed, Reason}}
-                    end;
+                    initialize_connection(Path, Connection);
                 {error, Reason} ->
                     _ = file:delete(Path),
                     {error, {initialize_failed, Reason}}
@@ -93,6 +90,20 @@ initialize_file(Path) ->
             _ = file:delete(Path),
             {error, {permissions_failed, Reason}}
     end.
+
+initialize_connection(Path, Connection) ->
+    case erlite_sqlite_schema:initialize(Connection) of
+        ok ->
+            case erlite_sqlite:close(Connection) of
+                ok -> ok;
+                {error, Reason} -> {error, {close_failed, Reason}}
+            end;
+        {error, Reason} ->
+            _ = erlite_sqlite:close(Connection),
+            _ = file:delete(Path),
+            {error, {schema_initialization_failed, Reason}}
+    end.
+
 
 open_path(Path) ->
     case file:read_link_info(Path) of
@@ -127,4 +138,3 @@ delete_files([Path | Rest]) ->
         {error, enoent} -> delete_files(Rest);
         {error, Reason} -> {error, {auxiliary_delete_failed, Path, Reason}}
     end.
-

@@ -1,0 +1,7 @@
+{application, erlite_raft,
+ [{description, "Raft command and consensus boundary for Erlite"},
+  {vsn, "0.1.0"},
+  {applications, [kernel, stdlib, ra, erlite_sqlite]},
+  {env, []},
+  {modules, []}
+ ]}.

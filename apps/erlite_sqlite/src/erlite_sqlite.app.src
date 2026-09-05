@@ -1,6 +1,9 @@
 {application, erlite_sqlite,
  [{description, "Backend-neutral SQLite adapter boundary for Erlite"},
   {vsn, "0.1.0"},
+  {registered, [erlite_sqlite_sup, erlite_sqlite_database_sup,
+                erlite_sqlite_databases]},
+  {mod, {erlite_sqlite_app, []}},
   {applications, [kernel, stdlib, crypto, esqlite]},
   {env, [{adapter, erlite_sqlite_esqlite}]},
   {modules, []}
