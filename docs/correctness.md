@@ -63,3 +63,17 @@ A Phase 1 snapshot is usable only when its manifest format, database identity, p
 Snapshot creation is serialized by the database owner and uses SQLite's `VACUUM INTO` to obtain a consistent standalone image. Installation first copies the verified image to a uniquely named file in the destination directory, syncs it, closes any registered owner, and atomically renames it over the inactive database path. WAL sidecars from the prior image are removed only after activation. Replay then starts strictly after the snapshot's durable applied index.
 
 The manifest itself is synced before publication. A future production snapshot catalog must additionally sync containing directories and coordinate retention across nodes before allowing the command ledger to be pruned.
+
+## Persistent node identity
+
+Phase 2 node identity creation uses exclusive file creation and syncs the identity before returning success. Subsequent starts must load the same 128-bit ID and configured node name. A truncated or malformed identity, unsupported format version, or conflicting configured node name stops bootstrap; Erlite never silently assigns a replacement identity that could duplicate catalog membership.
+
+## Cluster catalog bootstrap
+
+The catalog group bootstraps with one member and reaches its required topology through verified joins. Its replicated state records distinct persistent node IDs and names, target RF=3, and quorum=2. Invalid or duplicate identities fail before a new Ra server is started. A bootstrap catalog is not production-ready until three nodes are active. Authoritative status is obtained with `ra:consistent_query/3`; callers must opt into potentially stale local status explicitly.
+
+Catalog node lifecycle changes are explicit replicated transitions: `joining` precedes activation and `leaving` precedes removal. Each transition is idempotent, identity collisions fail closed, and an interrupted external Ra membership workflow remains visible for reconciliation instead of falsely reporting the node active or absent.
+
+A joining node is not marked active until its Ra membership is committed and its local catalog machine can answer from caught-up state. A leave is refused when only three active catalog nodes remain, preserving RF=3 until a replacement is joined. For an allowed removal, the catalog records `leaving` before Ra's consensus-backed membership removal and deletes the departed Ra server before catalog finalization. Failures leave a visible transitional state for retry.
+
+Before `init-cluster` starts Ra, it exclusively persists an `initializing` record containing the generated cluster ID and configured name. A retry always reuses this cluster ID. Join persists the cluster identity learned through a consistent seed query before changing membership. Local metadata becomes `active` only after the node is active in the catalog. Atomic replacement and file sync prevent a partially written state transition from being accepted after restart.
