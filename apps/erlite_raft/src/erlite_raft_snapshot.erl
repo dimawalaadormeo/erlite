@@ -2,7 +2,7 @@
 
 -export([create/7, verify/4, install/4]).
 
--define(FORMAT_VERSION, 1).
+-define(FORMAT_VERSION, 2).
 
 -spec create(pid(), file:filename_all(), binary(), non_neg_integer(),
              non_neg_integer(), non_neg_integer(), non_neg_integer()) ->
@@ -22,19 +22,31 @@ create_image(Owner, Image, ManifestPath, DatabaseId, Generation, Index, Term,
     _ = file:delete(Image),
     case erlite_sqlite_owner:snapshot_into(Owner, Image) of
         ok ->
-            case checksum(Image) of
-                {ok, Digest} ->
-                    Manifest = #{format_version => ?FORMAT_VERSION,
-                                 database_id => DatabaseId,
-                                 generation => Generation,
-                                 raft_index => Index,
-                                 raft_term => Term,
-                                 schema_version => SchemaVersion,
-                                 image => filename:basename(Image),
-                                 sha256 => Digest},
-                    write_manifest(ManifestPath, Manifest);
-                Error -> Error
+            case {sync_file(Image),
+                  erlite_sqlite_owner:runtime_identity(Owner)} of
+                {ok, {ok, RuntimeIdentity}} ->
+                    finish_image(Image, ManifestPath, DatabaseId, Generation,
+                                 Index, Term, SchemaVersion, RuntimeIdentity);
+                {{error, _Reason} = Error, _} -> Error;
+                {_, {error, _Reason} = Error} -> Error
             end;
+        {error, _Reason} = Error -> Error
+    end.
+
+finish_image(Image, ManifestPath, DatabaseId, Generation, Index, Term,
+             SchemaVersion, RuntimeIdentity) ->
+    case checksum(Image) of
+        {ok, Digest} ->
+            Manifest = #{format_version => ?FORMAT_VERSION,
+                         database_id => DatabaseId,
+                         generation => Generation,
+                         raft_index => Index,
+                         raft_term => Term,
+                         schema_version => SchemaVersion,
+                         runtime_identity => RuntimeIdentity,
+                         image => filename:basename(Image),
+                         sha256 => Digest},
+            write_manifest(ManifestPath, Manifest);
         {error, _Reason} = Error -> Error
     end.
 
@@ -46,6 +58,7 @@ verify(ManifestPath, DatabaseId, Generation, MinimumIndex) ->
                           database_id := DatabaseId,
                           generation := Generation,
                           raft_index := Index,
+                          runtime_identity := RuntimeIdentity,
                           image := ImageName,
                           sha256 := Expected}}
           when is_integer(Index), Index >= MinimumIndex, is_list(ImageName),
@@ -54,7 +67,9 @@ verify(ManifestPath, DatabaseId, Generation, MinimumIndex) ->
                 true ->
                     Image = filename:join(filename:dirname(ManifestPath), ImageName),
                     case checksum(Image) of
-                        {ok, Expected} -> verify_applied_index(Image, Index, Manifest);
+                        {ok, Expected} -> verify_image(
+                                            Image, Index, RuntimeIdentity,
+                                            Manifest);
                         {ok, _Other} -> {error, snapshot_checksum_mismatch};
                         ChecksumError -> ChecksumError
                     end;
@@ -64,17 +79,25 @@ verify(ManifestPath, DatabaseId, Generation, MinimumIndex) ->
         Error -> Error
     end.
 
-verify_applied_index(Image, Index, Manifest) ->
+verify_image(Image, Index, RuntimeIdentity, Manifest) ->
     case erlite_sqlite:open(Image) of
         {ok, Connection} ->
-            Result = case erlite_sqlite_schema:last_applied_index(Connection) of
-                         {ok, Index} -> {ok, Manifest, Image};
-                         {ok, Other} -> {error, {snapshot_index_mismatch, Index, Other}};
-                         Error -> Error
+            Result = case erlite_sqlite_compatibility:verify(
+                            Connection, RuntimeIdentity) of
+                         ok -> verify_applied_index(
+                                 Connection, Image, Index, Manifest);
+                         {error, _Reason} = Error -> Error
                      end,
             _ = erlite_sqlite:close(Connection),
             Result;
         {error, Reason} -> {error, {snapshot_open_failed, Reason}}
+    end.
+
+verify_applied_index(Connection, Image, Index, Manifest) ->
+    case erlite_sqlite_schema:last_applied_index(Connection) of
+        {ok, Index} -> {ok, Manifest, Image};
+        {ok, Other} -> {error, {snapshot_index_mismatch, Index, Other}};
+        Error -> Error
     end.
 
 -spec install(file:filename_all(), binary(), non_neg_integer(), file:filename_all()) ->
@@ -144,11 +167,38 @@ write_manifest(Path, Manifest) ->
                      end,
             _ = file:close(File),
             case Result of
-                ok -> {ok, Path};
+                ok ->
+                    case sync_directory(filename:dirname(Path)) of
+                        ok -> {ok, Path};
+                        {error, Reason} ->
+                            {error, {manifest_directory_sync_failed, Reason}}
+                    end;
                 WriteError -> {error, {manifest_write_failed, WriteError}}
             end;
         {error, eexist} -> {error, snapshot_exists};
         {error, Reason} -> {error, {manifest_open_failed, Reason}}
+    end.
+
+sync_directory(Path) ->
+    case os:find_executable("sync") of
+        false -> {error, sync_executable_not_found};
+        Executable ->
+            Port = open_port(
+                     {spawn_executable, Executable},
+                     [{args, ["-d", Path]}, exit_status, stderr_to_stdout,
+                      binary, use_stdio]),
+            wait_sync(Port, <<>>)
+    end.
+
+wait_sync(Port, Output) ->
+    receive
+        {Port, {data, Data}} -> wait_sync(Port, <<Output/binary, Data/binary>>);
+        {Port, {exit_status, 0}} -> ok;
+        {Port, {exit_status, Status}} ->
+            {error, {sync_failed, Status, Output}}
+    after 5000 ->
+        _ = port_close(Port),
+        {error, sync_timeout}
     end.
 
 read_manifest(Path) ->

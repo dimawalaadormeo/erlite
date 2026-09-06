@@ -8,10 +8,18 @@
 -spec validate(binary(), erlite_sqlite_adapter:params()) ->
     ok | {error, term()}.
 validate(Sql, Params) when is_binary(Sql), is_list(Params) ->
-    case matches_supported_statement(Sql) of
-        true -> validate_parameter_count(Sql, Params);
-        false -> {error, {unsupported_replicated_sql, Sql}}
+    case targets_internal_table(Sql) of
+        true -> {error, {reserved_internal_table, Sql}};
+        false ->
+            case matches_supported_statement(Sql) of
+                true -> validate_parameter_count(Sql, Params);
+                false -> {error, {unsupported_replicated_sql, Sql}}
+            end
     end.
+
+targets_internal_table(Sql) ->
+    matches(Sql,
+            "^\\s*(?:INSERT\\s+INTO|UPDATE|DELETE\\s+FROM)\\s+__ERLITE_").
 
 matches_supported_statement(Sql) ->
     matches(Sql, insert_pattern()) orelse

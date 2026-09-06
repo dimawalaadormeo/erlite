@@ -1,7 +1,7 @@
 -module(erlite_raft_command).
 
 -export([new_transaction/3, validate/1, transaction_id/1,
-         schema_version/1, statements/1]).
+         schema_version/1, statements/1, hash/1]).
 -export_type([command/0, mutation/0]).
 
 -type mutation() :: {binary(), erlite_sqlite_adapter:params()}.
@@ -40,6 +40,10 @@ schema_version({transaction, _TransactionId, SchemaVersion, _Mutations}) ->
 -spec statements(command()) -> [erlite_sqlite_adapter:statement()].
 statements({transaction, _TransactionId, _SchemaVersion, Mutations}) ->
     [{execute, Sql, Params} || {Sql, Params} <- Mutations].
+
+-spec hash(command()) -> binary().
+hash(Command) ->
+    crypto:hash(sha256, term_to_binary(Command, [deterministic])).
 
 validate_transaction_id(TransactionId)
   when is_binary(TransactionId), byte_size(TransactionId) > 0 ->

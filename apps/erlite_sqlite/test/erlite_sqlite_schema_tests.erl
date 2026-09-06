@@ -25,9 +25,9 @@ apply_and_duplicate_delivery_test() ->
                              <<"INSERT INTO values_table(value) VALUES (?)">>,
                              [<<"once">>]}],
               ?assertEqual({ok, applied},
-                           erlite_sqlite_schema:apply_committed(Connection, 1, Statements)),
+                           apply(Connection, 0, 1, <<"tx-1">>, <<"one">>, Statements)),
               ?assertEqual({ok, already_applied},
-                           erlite_sqlite_schema:apply_committed(Connection, 1, Statements)),
+                           apply(Connection, 0, 1, <<"tx-1">>, <<"one">>, Statements)),
               ?assertEqual({ok, 1}, erlite_sqlite_schema:last_applied_index(Connection)),
               ?assertMatch({ok, #{rows := [[1]]}},
                            erlite_sqlite:query(Connection,
@@ -49,7 +49,7 @@ failed_apply_does_not_advance_index_or_commit_partial_work_test() ->
                   {execute, <<"INSERT INTO values_table(value) VALUES (?)">>, [<<"same">>]}
               ],
               ?assertMatch({error, _},
-                           erlite_sqlite_schema:apply_committed(Connection, 1, Statements)),
+                           apply(Connection, 0, 1, <<"tx-1">>, <<"bad">>, Statements)),
               ?assertEqual({ok, 0}, erlite_sqlite_schema:last_applied_index(Connection)),
               ?assertMatch({ok, #{rows := [[0]]}},
                            erlite_sqlite:query(Connection,
@@ -58,17 +58,15 @@ failed_apply_does_not_advance_index_or_commit_partial_work_test() ->
               Connection
       end).
 
-index_gap_and_query_statement_are_rejected_test() ->
+invalid_transition_and_query_statement_are_rejected_test() ->
     with_database(
       fun(_Path, Connection) ->
               ok = erlite_sqlite_schema:initialize(Connection),
-              ?assertEqual({error, {raft_index_gap, 0, 2}},
-                           erlite_sqlite_schema:apply_committed(Connection, 2, [])),
               Query = {query, <<"SELECT 1">>, []},
               ?assertEqual({error, {invalid_replicated_statement, Query}},
-                           erlite_sqlite_schema:apply_committed(Connection, 1, [Query])),
-              ?assertEqual({error, {invalid_raft_index, 0}},
-                           erlite_sqlite_schema:apply_committed(Connection, 0, [])),
+                           apply(Connection, 0, 1, <<"tx-1">>, <<"query">>, [Query])),
+              ?assertEqual({error, {invalid_raft_index_transition, 1, 1}},
+                           apply(Connection, 1, 1, <<"tx-1">>, <<"same">>, [])),
               Connection
       end).
 
@@ -83,16 +81,50 @@ known_raft_index_gap_can_be_advanced_atomically_test() ->
                              [<<"at-five">>]}],
               ?assertEqual({ok, applied},
                            erlite_sqlite_schema:apply_committed(
-                             Connection, 0, 5, Statements)),
+                             Connection, 0, 5, <<"tx-5">>, hash(<<"five">>),
+                             Statements)),
               ?assertEqual({ok, 5}, erlite_sqlite_schema:last_applied_index(Connection)),
               ?assertEqual({ok, already_applied},
                            erlite_sqlite_schema:apply_committed(
-                             Connection, 0, 5, Statements)),
+                             Connection, 0, 5, <<"tx-5">>, hash(<<"five">>),
+                             Statements)),
               ?assertEqual({error, {raft_index_mismatch, 2, 5, 8}},
                            erlite_sqlite_schema:apply_committed(
-                             Connection, 2, 8, Statements)),
+                             Connection, 2, 8, <<"tx-8">>, hash(<<"eight">>),
+                             Statements)),
               Connection
       end).
+
+logical_transaction_retry_is_deduplicated_and_conflicts_fail_closed_test() ->
+    with_database(
+      fun(_Path, Connection) ->
+              ok = erlite_sqlite_schema:initialize(Connection),
+              {ok, _} = erlite_sqlite:execute(
+                          Connection, <<"CREATE TABLE values_table (value TEXT)">>, []),
+              Statement = {execute,
+                           <<"INSERT INTO values_table(value) VALUES (?)">>,
+                           [<<"once">>]},
+              ?assertEqual({ok, applied},
+                           apply(Connection, 0, 2, <<"logical-tx">>,
+                                 <<"command-a">>, [Statement])),
+              ?assertEqual({ok, already_applied},
+                           apply(Connection, 2, 7, <<"logical-tx">>,
+                                 <<"command-a">>, [Statement])),
+              ?assertEqual({ok, transaction_id_conflict},
+                           apply(Connection, 7, 9, <<"logical-tx">>,
+                                 <<"command-b">>, [Statement])),
+              ?assertEqual({ok, 9}, erlite_sqlite_schema:last_applied_index(Connection)),
+              ?assertMatch({ok, #{rows := [[1]]}},
+                           erlite_sqlite:query(
+                             Connection, <<"SELECT count(*) FROM values_table">>, [])),
+              Connection
+      end).
+
+apply(Connection, Expected, Index, TransactionId, Command, Statements) ->
+    erlite_sqlite_schema:apply_committed(
+      Connection, Expected, Index, TransactionId, hash(Command), Statements).
+
+hash(Value) -> crypto:hash(sha256, Value).
 
 with_database(Test) ->
     Path = temporary_database_path(),

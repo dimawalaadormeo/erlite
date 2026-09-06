@@ -6,7 +6,7 @@
 validate(Connection) ->
     Sql = <<"SELECT type, name, sql FROM sqlite_schema "
             "WHERE name NOT LIKE 'sqlite_%' "
-            "AND name <> '__erlite_replica_metadata' "
+            "AND name NOT LIKE '__erlite_%' "
             "ORDER BY type, name">>,
     case erlite_sqlite:query(Connection, Sql, []) of
         {ok, #{rows := Rows}} -> validate_objects(Rows);

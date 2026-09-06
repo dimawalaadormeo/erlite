@@ -37,7 +37,9 @@ concurrent_duplicate_apply_is_serialized_test() ->
                            fun() ->
                                    Parent ! {self(),
                                              erlite_sqlite_owner:apply_committed(
-                                               Owner, 1, [Statement])}
+                                               Owner, 0, 1, <<"tx-1">>,
+                                               crypto:hash(sha256, <<"command">>),
+                                               [Statement])}
                            end) || _ <- lists:seq(1, 20)],
               Results = [receive {Pid, Result} -> Result end || {Pid, _Ref} <- Workers],
               ?assertEqual(1, length([applied || {ok, applied} <- Results])),

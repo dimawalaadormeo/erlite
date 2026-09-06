@@ -37,8 +37,10 @@ commit_apply_and_restart_catch_up(Config) ->
     {ok, _} = erlite_sqlite_owner:execute(
                 Owner1, <<"CREATE TABLE items (id INTEGER PRIMARY KEY, value TEXT)">>, []),
     Members = member_ids(),
+    {ok, RuntimeIdentity} = erlite_sqlite_owner:runtime_identity(Owner1),
     {ok, StartedMembers, []} =
-        erlite_raft_cluster:start(<<"erlite_phase1_test">>, member_names()),
+        erlite_raft_cluster:start(
+          <<"erlite_phase1_test">>, member_names(), RuntimeIdentity),
     Members = lists:sort(StartedMembers),
     Command1 = command(<<"tx-1">>, 1, <<"one">>),
     {ok, FirstIndex, Leader} =
@@ -65,6 +67,12 @@ commit_apply_and_restart_catch_up(Config) ->
     {ok, #{rows := [[1, <<"one">>], [2, <<"two">>]]}} =
         erlite_sqlite_owner:query(
           RecoveryOwner, <<"SELECT id, value FROM items ORDER BY id">>, []),
+    {ok, RetryIndex, _} = erlite_raft_cluster:submit(Leader, Command1, 10000),
+    {ok, RetryIndex} = erlite_raft_applier:catch_up(
+                         Leader, RecoveryOwner, 10000),
+    {ok, #{rows := [[2]]}} = erlite_sqlite_owner:query(
+                                RecoveryOwner,
+                                <<"SELECT count(*) FROM items">>, []),
     {ok, ManifestBinary} = file:read_file(Manifest),
     #{image := ImageName} = binary_to_term(ManifestBinary, [safe]),
     ImagePath = filename:join(filename:dirname(Manifest), ImageName),

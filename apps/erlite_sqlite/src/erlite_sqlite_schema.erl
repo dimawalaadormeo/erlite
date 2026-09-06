@@ -1,10 +1,11 @@
 -module(erlite_sqlite_schema).
 
--export([initialize/1, last_applied_index/1, apply_committed/3, apply_committed/4]).
+-export([initialize/1, last_applied_index/1, transaction_status/3,
+         apply_committed/6]).
 
 -define(FORMAT_VERSION, 1).
 
--type apply_result() :: applied | already_applied.
+-type apply_result() :: applied | already_applied | transaction_id_conflict.
 
 -spec initialize(erlite_sqlite:connection()) -> ok | {error, term()}.
 initialize(Connection) ->
@@ -19,7 +20,14 @@ initialize(Connection) ->
         {execute,
          <<"INSERT OR IGNORE INTO __erlite_replica_metadata "
            "(singleton, format_version, last_applied_raft_index) VALUES (1, ?, 0)">>,
-         [?FORMAT_VERSION]}
+         [?FORMAT_VERSION]},
+        {execute,
+         <<"CREATE TABLE IF NOT EXISTS __erlite_transactions ("
+           "transaction_id BLOB PRIMARY KEY, "
+           "command_hash BLOB NOT NULL, "
+           "original_raft_index INTEGER NOT NULL CHECK (original_raft_index > 0)"
+           ")">>,
+         []}
     ],
     case erlite_sqlite:transaction(Connection, Statements) of
         {ok, _Results} -> verify_format(Connection);
@@ -40,63 +48,86 @@ last_applied_index(Connection) ->
             Error
     end.
 
--spec apply_committed(erlite_sqlite:connection(), pos_integer(),
-                      [erlite_sqlite_adapter:statement()]) ->
-    {ok, apply_result()} | {error, term()}.
-apply_committed(Connection, RaftIndex, Statements)
-  when is_integer(RaftIndex), RaftIndex > 0, is_list(Statements) ->
-    case validate_write_statements(Statements) of
-        ok -> apply_after_index_check(Connection, RaftIndex, Statements);
+-spec transaction_status(erlite_sqlite:connection(), binary(), binary()) ->
+    new | duplicate | conflict | {error, term()}.
+transaction_status(Connection, TransactionId, CommandHash) ->
+    Sql = <<"SELECT command_hash FROM __erlite_transactions "
+            "WHERE transaction_id = ?">>,
+    case erlite_sqlite:query(Connection, Sql, [TransactionId]) of
+        {ok, #{rows := []}} -> new;
+        {ok, #{rows := [[CommandHash]]}} -> duplicate;
+        {ok, #{rows := [[_DifferentHash]]}} -> conflict;
+        {ok, #{rows := Rows}} ->
+            {error, {invalid_transaction_record, TransactionId, Rows}};
         {error, _Reason} = Error -> Error
-    end;
-apply_committed(_Connection, RaftIndex, _Statements) ->
-    {error, {invalid_raft_index, RaftIndex}}.
+    end.
 
 -spec apply_committed(erlite_sqlite:connection(), non_neg_integer(),
-                      pos_integer(), [erlite_sqlite_adapter:statement()]) ->
+                      pos_integer(), binary(), binary(),
+                      [erlite_sqlite_adapter:statement()]) ->
     {ok, apply_result()} | {error, term()}.
-apply_committed(Connection, ExpectedIndex, RaftIndex, Statements)
+apply_committed(Connection, ExpectedIndex, RaftIndex, TransactionId, CommandHash,
+                Statements)
   when is_integer(ExpectedIndex), ExpectedIndex >= 0,
-       is_integer(RaftIndex), RaftIndex > ExpectedIndex, is_list(Statements) ->
+       is_integer(RaftIndex), RaftIndex > ExpectedIndex,
+       is_binary(TransactionId), byte_size(TransactionId) > 0,
+       is_binary(CommandHash), byte_size(CommandHash) =:= 32,
+       is_list(Statements) ->
     case validate_write_statements(Statements) of
         ok -> apply_after_expected_index(Connection, ExpectedIndex,
-                                         RaftIndex, Statements);
+                                         RaftIndex, TransactionId,
+                                         CommandHash, Statements);
         {error, _Reason} = Error -> Error
     end;
-apply_committed(_Connection, ExpectedIndex, RaftIndex, _Statements) ->
+apply_committed(_Connection, ExpectedIndex, RaftIndex, _TransactionId,
+                _CommandHash, _Statements) ->
     {error, {invalid_raft_index_transition, ExpectedIndex, RaftIndex}}.
 
-apply_after_expected_index(Connection, ExpectedIndex, RaftIndex, Statements) ->
+apply_after_expected_index(Connection, ExpectedIndex, RaftIndex, TransactionId,
+                           CommandHash, Statements) ->
     case last_applied_index(Connection) of
         {ok, CurrentIndex} when RaftIndex =< CurrentIndex ->
             {ok, already_applied};
         {ok, ExpectedIndex} ->
-            apply_next(Connection, RaftIndex, Statements);
+            apply_transaction(Connection, RaftIndex, TransactionId,
+                              CommandHash, Statements);
         {ok, CurrentIndex} ->
             {error, {raft_index_mismatch, ExpectedIndex, CurrentIndex, RaftIndex}};
         {error, _Reason} = Error -> Error
     end.
 
-apply_after_index_check(Connection, RaftIndex, Statements) ->
-    case last_applied_index(Connection) of
-        {ok, CurrentIndex} when RaftIndex =< CurrentIndex ->
-            {ok, already_applied};
-        {ok, CurrentIndex} when RaftIndex =:= CurrentIndex + 1 ->
-            apply_next(Connection, RaftIndex, Statements);
-        {ok, CurrentIndex} ->
-            {error, {raft_index_gap, CurrentIndex, RaftIndex}};
-        {error, _Reason} = Error ->
-            Error
+apply_transaction(Connection, RaftIndex, TransactionId, CommandHash, Statements) ->
+    case transaction_status(Connection, TransactionId, CommandHash) of
+        new ->
+            record_and_apply(Connection, RaftIndex, TransactionId,
+                             CommandHash, Statements);
+        duplicate ->
+            advance_duplicate(Connection, RaftIndex);
+        conflict ->
+            commit_with_index(Connection, RaftIndex, [],
+                              transaction_id_conflict);
+        {error, _Reason} = Error -> Error
     end.
 
-apply_next(Connection, RaftIndex, Statements) ->
+record_and_apply(Connection, RaftIndex, TransactionId, CommandHash, Statements) ->
+    Record =
+        {execute,
+         <<"INSERT INTO __erlite_transactions "
+           "(transaction_id, command_hash, original_raft_index) VALUES (?, ?, ?)">>,
+         [TransactionId, CommandHash, RaftIndex]},
+    commit_with_index(Connection, RaftIndex, Statements ++ [Record], applied).
+
+advance_duplicate(Connection, RaftIndex) ->
+    commit_with_index(Connection, RaftIndex, [], already_applied).
+
+commit_with_index(Connection, RaftIndex, Statements, Result) ->
     UpdateIndex =
         {execute,
          <<"UPDATE __erlite_replica_metadata "
            "SET last_applied_raft_index = ? WHERE singleton = 1">>,
          [RaftIndex]},
     case erlite_sqlite:transaction(Connection, Statements ++ [UpdateIndex]) of
-        {ok, _Results} -> {ok, applied};
+        {ok, _Results} -> {ok, Result};
         {error, _Reason} = Error -> Error
     end.
 

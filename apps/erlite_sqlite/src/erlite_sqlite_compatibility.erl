@@ -1,6 +1,6 @@
 -module(erlite_sqlite_compatibility).
 
--export([runtime_identity/1, fingerprint/1, verify/2]).
+-export([runtime_identity/1, fingerprint/1, validate/1, verify/2]).
 -export_type([runtime_identity/0]).
 
 -type runtime_identity() ::
@@ -34,9 +34,9 @@ fingerprint(#{sqlite_version := Version,
 -spec verify(erlite_sqlite:connection(), runtime_identity()) ->
     ok | {error, term()}.
 verify(Connection, Expected) ->
-    case validate_identity(Expected) of
+    case validate(Expected) of
         ok -> verify_valid_identity(Connection, Expected);
-        error -> {error, {invalid_sqlite_runtime_identity, Expected}}
+        {error, _Reason} = Error -> Error
     end.
 
 verify_valid_identity(Connection, Expected) ->
@@ -48,16 +48,17 @@ verify_valid_identity(Connection, Expected) ->
         {error, _Reason} = Error -> Error
     end.
 
-validate_identity(#{sqlite_version := Version,
-                    sqlite_source_id := SourceId,
-                    compile_options := Options})
+-spec validate(term()) -> ok | {error, term()}.
+validate(#{sqlite_version := Version,
+           sqlite_source_id := SourceId,
+           compile_options := Options} = Identity)
   when is_binary(Version), is_binary(SourceId), is_list(Options) ->
     case lists:all(fun is_binary/1, Options) of
         true -> ok;
-        false -> error
+        false -> {error, {invalid_sqlite_runtime_identity, Identity}}
     end;
-validate_identity(_Identity) ->
-    error.
+validate(Identity) ->
+    {error, {invalid_sqlite_runtime_identity, Identity}}.
 
 read_version(Connection) ->
     Sql = <<"SELECT sqlite_version() AS sqlite_version, "

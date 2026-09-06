@@ -50,6 +50,12 @@ placeholder_count_must_match_parameters_test() ->
     ?assertEqual({error, {parameter_count_mismatch, 1, 2}},
                  validate(<<"DELETE FROM items WHERE id = ?">>, [1, 2])).
 
+internal_replica_tables_are_reserved_test() ->
+    Sql = <<"INSERT INTO __erlite_transactions "
+            "(transaction_id) VALUES (?)">>,
+    ?assertEqual({error, {reserved_internal_table, Sql}},
+                 validate(Sql, [<<"attack">>])).
+
 validate(Sql, Params) ->
     erlite_raft_sql_policy:validate(Sql, Params).
 
