@@ -20,6 +20,18 @@ The initial SQL policy is intentionally narrow. It accepts parameterized `INSERT
 
 `erlite_core` owns the top-level Erlite supervision tree. It currently starts with no children so later components can be added deliberately with explicit restart and failure semantics.
 
+Phase 2 node bootstrap begins with `erlite_node_identity`. The identity is stored under `<storage_path>/node/identity` with owner-only permissions and contains a format version, a stable random 128-bit node ID, and the configured distributed Erlang node name. Creation is exclusive, concurrent creators reload the winner, and malformed, unsupported, or name-conflicting identities fail closed instead of being replaced.
+
+`erlite_cluster_config` resolves application configuration with `ERLITE_*` environment overrides for container deployment. Phase 2 fixes replication factor at three, canonicalizes duplicate seed nodes, requires absolute storage paths, and validates distributed node names before bootstrap can touch persistent state.
+
+### `erlite_catalog`
+
+The Phase 2 cluster catalog is a dedicated RabbitMQ `ra` group that bootstraps with one member and must expand to three before it is production-ready. Its replicated state binds the cluster ID and name to unique persistent node IDs, node names, and Ra server IDs, and records target RF=3 with quorum=2. Catalog status uses a Ra consistent query; local status is explicitly separate and may be stale.
+
+Catalog join and leave are staged workflows. Join first records `joining`, starts the new Ra server, commits Ra membership, verifies that member can read caught-up local machine state, and only then records `active`. Leave records `leaving`, uses Ra's consensus-backed leave-and-delete operation, and finalizes removal through surviving members. Phase 2 refuses a leave that would reduce active catalog nodes below three; later automatic replacement must add and verify a replacement before removal.
+
+`erlite_cluster` is the operational facade behind `erlite_cli`. `init-cluster` creates a one-member bootstrap catalog that is expanded by `join` to the required three members; a cluster is not production-ready until status reports three active nodes. Local cluster metadata is persisted at `<storage_path>/node/cluster` before Ra bootstrap and transitions from `initializing` to `active` only after the local catalog is usable. `cluster status` is a consistent catalog query, not a local-file projection.
+
 ### `erlite_sqlite`
 
 `erlite_sqlite` is the only boundary through which Erlite components access SQLite. Callers receive an opaque connection and use normalized Erlite request and result types. Backend-specific connection handles and result formats do not escape this application.

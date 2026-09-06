@@ -1,0 +1,7 @@
+{application, erlite_catalog,
+ [{description, "Replicated Erlite cluster catalog"},
+  {vsn, "0.1.0"},
+  {applications, [kernel, stdlib, ra]},
+  {env, []},
+  {modules, []}
+ ]}.

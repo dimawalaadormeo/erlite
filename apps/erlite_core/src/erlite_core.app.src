@@ -3,7 +3,7 @@
   {vsn, "0.1.0"},
   {registered, [erlite_core_sup]},
   {mod, {erlite_core_app, []}},
-  {applications, [kernel, stdlib, erlite_sqlite]},
-  {env, []},
+  {applications, [kernel, stdlib, crypto, ra, erlite_catalog, erlite_sqlite]},
+  {env, [{replication_factor, 3}, {seed_nodes, []}]},
   {modules, []}
  ]}.
