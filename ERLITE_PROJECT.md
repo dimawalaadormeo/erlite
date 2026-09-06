@@ -774,6 +774,8 @@ Exit criteria:
 
 ### Phase 2 — Basic three-server Erlite cluster
 
+**Status: complete**
+
 Required:
 
 - `erlite init-cluster`
@@ -787,6 +789,8 @@ Required:
 - quorum=2
 
 ### Phase 3 — Single-database HA
+
+**Status: complete**
 
 Validate:
 

@@ -2,7 +2,7 @@
 -behaviour(gen_server).
 
 -export([start_link/2, close/1, execute/3, query/3, transaction/2,
-         last_applied_index/1, apply_committed/3, apply_committed/4,
+         last_applied_index/1, transaction_status/3, apply_committed/6,
          runtime_identity/1, verify_runtime/2, validate_schema/1,
          snapshot_into/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
@@ -36,17 +36,20 @@ transaction(Pid, Statements) ->
 last_applied_index(Pid) ->
     gen_server:call(Pid, last_applied_index, infinity).
 
--spec apply_committed(pid(), pos_integer(), [erlite_sqlite_adapter:statement()]) ->
-    {ok, applied | already_applied} | {error, term()}.
-apply_committed(Pid, RaftIndex, Statements) ->
-    gen_server:call(Pid, {apply_committed, RaftIndex, Statements}, infinity).
-
--spec apply_committed(pid(), non_neg_integer(), pos_integer(),
-                      [erlite_sqlite_adapter:statement()]) ->
-    {ok, applied | already_applied} | {error, term()}.
-apply_committed(Pid, ExpectedIndex, RaftIndex, Statements) ->
-    gen_server:call(Pid, {apply_committed, ExpectedIndex, RaftIndex, Statements},
+-spec transaction_status(pid(), binary(), binary()) ->
+    new | duplicate | conflict | {error, term()}.
+transaction_status(Pid, TransactionId, CommandHash) ->
+    gen_server:call(Pid, {transaction_status, TransactionId, CommandHash},
                     infinity).
+
+-spec apply_committed(pid(), non_neg_integer(), pos_integer(), binary(), binary(),
+                      [erlite_sqlite_adapter:statement()]) ->
+    {ok, applied | already_applied | transaction_id_conflict} | {error, term()}.
+apply_committed(Pid, ExpectedIndex, RaftIndex, TransactionId, CommandHash,
+                Statements) ->
+    gen_server:call(
+      Pid, {apply_committed, ExpectedIndex, RaftIndex, TransactionId,
+            CommandHash, Statements}, infinity).
 
 -spec runtime_identity(pid()) ->
     {ok, erlite_sqlite_compatibility:runtime_identity()} | {error, term()}.
@@ -80,14 +83,16 @@ handle_call({transaction, Statements}, _From, State = #state{connection = Connec
     {reply, erlite_sqlite:transaction(Connection, Statements), State};
 handle_call(last_applied_index, _From, State = #state{connection = Connection}) ->
     {reply, erlite_sqlite_schema:last_applied_index(Connection), State};
-handle_call({apply_committed, RaftIndex, Statements}, _From,
+handle_call({transaction_status, TransactionId, CommandHash}, _From,
             State = #state{connection = Connection}) ->
-    Reply = erlite_sqlite_schema:apply_committed(Connection, RaftIndex, Statements),
-    {reply, Reply, State};
-handle_call({apply_committed, ExpectedIndex, RaftIndex, Statements}, _From,
+    {reply, erlite_sqlite_schema:transaction_status(
+              Connection, TransactionId, CommandHash), State};
+handle_call({apply_committed, ExpectedIndex, RaftIndex, TransactionId,
+             CommandHash, Statements}, _From,
             State = #state{connection = Connection}) ->
     Reply = erlite_sqlite_schema:apply_committed(
-              Connection, ExpectedIndex, RaftIndex, Statements),
+              Connection, ExpectedIndex, RaftIndex, TransactionId,
+              CommandHash, Statements),
     {reply, Reply, State};
 handle_call(runtime_identity, _From, State = #state{connection = Connection}) ->
     {reply, erlite_sqlite_compatibility:runtime_identity(Connection), State};
