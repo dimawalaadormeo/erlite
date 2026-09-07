@@ -874,6 +874,13 @@ Build:
 
 Provide PHP and Python examples.
 
+**Development checkpoint (2026-09-07):** Work is paused at the Phase 6/Phase 7
+boundary. Phase 6 and its follow-up review fixes are complete, including
+exception-safe HTTP parsing, engine-enforced read-only queries, and fail-closed
+handling when SQLite writable mode cannot be restored. Final verification
+completed 77 EUnit tests and 10 distributed Common Test cases. Resume with
+Phase 7 node expansion and durable database movement.
+
 ### Phase 7 — Node expansion and database movement
 
 Test 3 -> 4 nodes, then 4 -> 6 nodes.
