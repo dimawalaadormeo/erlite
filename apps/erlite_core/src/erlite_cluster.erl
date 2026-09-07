@@ -15,7 +15,7 @@ init_with_identity(#{storage_path := Root}, Identity, ClusterName) ->
         {ok, ClusterId} ->
             case erlite_cluster_metadata:ensure(Root, ClusterId, ClusterName) of
                 {ok, #{state := active, catalog_server_id := ServerId}} ->
-                    erlite_catalog:status(ServerId, 10000, consistent);
+                    status_and_configure(Root, ServerId, 10000);
                 {ok, _Initializing} ->
                     ServerId = catalog_server_id(),
                     Node = node_record(Identity, ServerId),
@@ -84,7 +84,23 @@ status(Root, Timeout) ->
 
 activate_and_status(Root, ServerId, Timeout) ->
     case erlite_cluster_metadata:activate(Root, ServerId) of
-        {ok, _} -> erlite_catalog:status(ServerId, Timeout, consistent);
+        {ok, _} -> status_and_configure(Root, ServerId, Timeout);
+        Error -> Error
+    end.
+
+status_and_configure(Root, ServerId, Timeout) ->
+    case erlite_catalog:status(ServerId, Timeout, consistent) of
+        {ok, _} = Result ->
+            ok = application:set_env(erlite_core, catalog_server, ServerId),
+            ok = application:set_env(erlite_core, storage_root, Root),
+            case whereis(erlite_database_lifecycle) of
+                Pid when is_pid(Pid) ->
+                    case erlite_database_lifecycle:configure(ServerId, Root) of
+                        ok -> Result;
+                        Error -> Error
+                    end;
+                undefined -> Result
+            end;
         Error -> Error
     end.
 

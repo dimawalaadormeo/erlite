@@ -2,7 +2,7 @@
 
 Erlite is an Erlang/OTP runtime for operating many independently replicated SQLite databases across a cluster.
 
-The project is being implemented incrementally according to [`ERLITE_PROJECT.md`](ERLITE_PROJECT.md). Phases 0 through 4 now provide the supervised SQLite boundary, replication correctness primitives, persistent node identity and configuration, a three-member RabbitMQ `ra` cluster catalog, single-database high availability, and isolated lifecycle management for multiple databases.
+The project is being implemented incrementally according to [`ERLITE_PROJECT.md`](ERLITE_PROJECT.md). Phases 0 through 5 now provide the supervised SQLite boundary, replication correctness primitives, persistent node identity and configuration, a three-member RabbitMQ `ra` cluster catalog, single-database high availability, isolated lifecycle management for multiple databases, durable catalog-fenced database workflows, restart reconciliation, and transparent ready-only routing.
 
 ## Requirements
 
@@ -19,4 +19,4 @@ rebar3 ct
 rebar3 escriptize
 ```
 
-The generated command supports `init-cluster`, `join <seed-node>`, `leave`, and `cluster status`. Distributed Erlang naming and cookies must be configured when starting the command VM. Phase 5 will add durable distributed database placement and transparent routing; the network API remains later roadmap work.
+The generated command supports `init-cluster`, `join <seed-node>`, `leave`, and `cluster status`. Distributed Erlang naming and cookies must be configured when starting the command VM. The network API remains Phase 6 work.

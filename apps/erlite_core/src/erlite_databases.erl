@@ -1,7 +1,8 @@
 -module(erlite_databases).
 -behaviour(gen_server).
 
--export([start_link/0, create/2, delete/1, list/0, status/1,
+-export([start_link/0, create/2, ensure/2, delete/1, delete_recorded/2,
+         list/0, status/1,
          write/3, query/4, cool/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
@@ -11,7 +12,10 @@ start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 create(DatabaseId, Options) -> gen_server:call(?MODULE, {create, DatabaseId, Options}, infinity).
+ensure(DatabaseId, Options) -> gen_server:call(?MODULE, {ensure, DatabaseId, Options}, infinity).
 delete(DatabaseId) -> gen_server:call(?MODULE, {delete, DatabaseId}, infinity).
+delete_recorded(DatabaseId, Options) ->
+    gen_server:call(?MODULE, {delete_recorded, DatabaseId, Options}, infinity).
 list() ->
     case route_entries() of
         {ok, Entries} -> {ok, lists:sort([DatabaseId || {DatabaseId, _} <- Entries])};
@@ -40,6 +44,15 @@ handle_call({create, DatabaseId, Options}, _From, State) ->
         true -> {reply, {error, database_exists}, State};
         false -> create_database(DatabaseId, Options, State)
     end;
+handle_call({ensure, DatabaseId, Options}, _From, State) ->
+    case maps:find(DatabaseId, State) of
+        {ok, #{pid := Pid, server_ids := ServerIds}} ->
+            case maps:get(server_ids, Options, undefined) of
+                ServerIds -> {reply, {ok, Pid}, State};
+                _ -> {reply, {error, database_placement_conflict}, State}
+            end;
+        error -> create_database(DatabaseId, Options#{ensure_existing => true}, State)
+    end;
 handle_call({delete, DatabaseId}, _From, State) ->
     case maps:find(DatabaseId, State) of
         error -> {reply, ok, State};
@@ -48,6 +61,20 @@ handle_call({delete, DatabaseId}, _From, State) ->
             Reply = database_call(Pid, delete),
             erlang:demonitor(Monitor, [flush]),
             {reply, Reply, maps:remove(DatabaseId, State)}
+    end;
+handle_call({delete_recorded, DatabaseId, Options}, _From, State) ->
+    case maps:find(DatabaseId, State) of
+        {ok, #{pid := Pid, monitor := Monitor, server_ids := ServerIds}} ->
+            case maps:get(server_ids, Options, undefined) of
+                ServerIds ->
+                    ets:delete(?ROUTES, DatabaseId),
+                    Reply = database_call(Pid, delete),
+                    erlang:demonitor(Monitor, [flush]),
+                    {reply, Reply, maps:remove(DatabaseId, State)};
+                _ -> {reply, {error, database_placement_conflict}, State}
+            end;
+        error ->
+            {reply, erlite_database:delete_resources(DatabaseId, Options), State}
     end;
 handle_call(_Request, _From, State) ->
     {reply, {error, unsupported_request}, State}.

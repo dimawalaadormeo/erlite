@@ -819,6 +819,25 @@ Define and measure initial per-database resource budgets in this phase.
 
 ### Phase 5 — Distributed catalog and transparent routing
 
+**Status: complete**
+
+Phase 5 provides:
+
+- replicated `DatabaseId` to replica-set records
+- lifecycle states for `creating`, `ready`, `deleting`, and `tombstoned`
+- consistent database lookup and incomplete-work discovery
+- idempotent operation-ID and placement-generation fencing
+- tombstone retention and next-generation reuse rules
+- active-node placement validation and Ra server-ID collision prevention
+- ready-only transparent `DatabaseId` resolution through consistent catalog reads
+- generation-aware local route caching with configuration-epoch fencing
+- Ra leader discovery validated against catalog placement and live membership
+- catalog-first physical create and delete workflows accepting only `DatabaseId`
+- deterministic RF=3 placement across active catalog nodes
+- restart reconciliation of `creating` and `deleting` records
+- idempotent completion of partially created SQLite replica sets
+- interruption tests for create and delete reconciliation
+
 Applications specify only `DatabaseId`.
 
 Build:
