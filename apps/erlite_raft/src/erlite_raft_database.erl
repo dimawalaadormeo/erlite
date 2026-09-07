@@ -45,7 +45,8 @@ consistent_read(ServerRef, Sql, Params, Replicas, Timeout) ->
                 {ok, Owner} ->
                     case erlite_raft_applier:catch_up(
                            Leader, Owner, Barrier, Timeout) of
-                        {ok, _Index} -> erlite_sqlite_owner:query(Owner, Sql, Params);
+                        {ok, _Index} ->
+                            erlite_sqlite_owner:readonly_query(Owner, Sql, Params);
                         Other -> Other
                     end;
                 Error -> Error

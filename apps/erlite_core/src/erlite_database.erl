@@ -29,8 +29,7 @@ init({DatabaseId, #{storage_root := StorageRoot,
     case Open(StorageRoot, DatabaseId, ServerIds) of
         {ok, Replicas, Roots, RuntimeIdentity} ->
             ClusterName = cluster_name(DatabaseId),
-            case erlite_raft_cluster:start(
-                   ClusterName, ServerIds, RuntimeIdentity) of
+            case ensure_raft_cluster(ClusterName, ServerIds, RuntimeIdentity) of
                 {ok, _Started, []} ->
                     {ok, #{database_id => DatabaseId,
                            storage_root => StorageRoot,
@@ -47,6 +46,18 @@ init({DatabaseId, #{storage_root := StorageRoot,
         {error, _Reason} = Error -> {stop, Error}
     end;
 init({_DatabaseId, _Options}) -> {stop, invalid_database_options}.
+
+ensure_raft_cluster(ClusterName, ServerIds, RuntimeIdentity) ->
+    case ra:members(ServerIds, 5000) of
+        {ok, Members, _Leader} ->
+            case lists:sort(Members) =:= lists:sort(ServerIds) of
+                true -> {ok, [], []};
+                false -> {error, {raft_membership_mismatch,
+                                  lists:sort(ServerIds), lists:sort(Members)}}
+            end;
+        _ -> erlite_raft_cluster:start(
+               ClusterName, ServerIds, RuntimeIdentity)
+    end.
 
 handle_call(status, _From, State) ->
     {reply, {ok, database_status(State)}, State};

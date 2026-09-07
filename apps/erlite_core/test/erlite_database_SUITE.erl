@@ -2,10 +2,12 @@
 
 -export([all/0, init_per_suite/1, end_per_suite/1,
          multiple_database_lifecycle_and_isolation/1,
-         catalog_lifecycle_reconciles_interrupted_work/1]).
+         catalog_lifecycle_reconciles_interrupted_work/1,
+         external_api_query_transaction_and_control/1]).
 
 all() -> [multiple_database_lifecycle_and_isolation,
-          catalog_lifecycle_reconciles_interrupted_work].
+          catalog_lifecycle_reconciles_interrupted_work,
+          external_api_query_transaction_and_control].
 
 init_per_suite(Config) ->
     Root = filename:join(
@@ -92,6 +94,46 @@ catalog_lifecycle_reconciles_interrupted_work(Config) ->
                      undefined =:= ra_directory:where_is(default, Name)
              end, Replicas),
     ok = erlite_database_lifecycle:delete(DatabaseId),
+    ok.
+
+external_api_query_transaction_and_control(_Config) ->
+    DatabaseId = <<"phase6-api">>,
+    Admin = #{role => admin},
+    Service = #{role => service, databases => [DatabaseId]},
+    {200, _} = erlite_api_handler:handle(
+                 <<"POST">>, <<"/v1/databases">>,
+                 #{<<"database_id">> => DatabaseId}, Admin),
+    {ok, Controller} = case ets:lookup(erlite_database_routes, DatabaseId) of
+                           [{DatabaseId, Pid}] -> {ok, Pid};
+                           [] -> {error, missing_controller}
+                       end,
+    #{replicas := Replicas} = sys:get_state(Controller),
+    lists:foreach(
+      fun(Owner) ->
+              {ok, _} = erlite_sqlite_owner:execute(
+                          Owner,
+                          <<"CREATE TABLE products (sku TEXT PRIMARY KEY, "
+                            "name TEXT NOT NULL)">>, [])
+      end, maps:values(Replicas)),
+    Transaction = #{<<"transaction_id">> => <<"api-write-1">>,
+                    <<"statements">> =>
+                        [#{<<"sql">> =>
+                               <<"INSERT INTO products(sku,name) VALUES(?,?)">>,
+                           <<"params">> => [<<"A1">>, <<"Widget">>]}]},
+    {200, _} = erlite_api_handler:handle(
+                 <<"POST">>, <<"/v1/databases/phase6-api/transactions">>,
+                 Transaction, Service),
+    {200, #{<<"result">> := #{<<"rows">> := [[<<"Widget">>]]}}} =
+        erlite_api_handler:handle(
+          <<"POST">>, <<"/v1/databases/phase6-api/query">>,
+          #{<<"sql">> => <<"SELECT name FROM products WHERE sku = ?">>,
+            <<"params">> => [<<"A1">>]}, Service),
+    {403, _} = erlite_api_handler:handle(
+                 <<"POST">>, <<"/v1/databases/phase6-api/query">>,
+                 #{<<"sql">> => <<"SELECT 1">>},
+                 #{role => service, databases => [<<"other">>]}),
+    {200, _} = erlite_api_handler:handle(
+                 <<"DELETE">>, <<"/v1/databases/phase6-api">>, #{}, Admin),
     ok.
 
 multiple_database_lifecycle_and_isolation(Config) ->

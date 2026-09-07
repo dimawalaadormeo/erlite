@@ -2,9 +2,10 @@
  [{description, "Erlite core OTP application"},
   {vsn, "0.1.0"},
   {registered, [erlite_core_sup, erlite_database_sup, erlite_databases,
-                erlite_database_router, erlite_database_lifecycle]},
+                erlite_database_router, erlite_database_lifecycle,
+                erlite_api_server]},
   {mod, {erlite_core_app, []}},
-  {applications, [kernel, stdlib, crypto, ra, erlite_catalog, erlite_sqlite,
+  {applications, [kernel, stdlib, crypto, ssl, ra, erlite_catalog, erlite_sqlite,
                   erlite_raft]},
   {env, [{replication_factor, 3}, {seed_nodes, []}]},
   {modules, []}

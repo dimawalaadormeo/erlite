@@ -853,6 +853,15 @@ Build:
 
 ### Phase 6 — External service interface
 
+**Status: complete**
+
+The initial service is a supervised TLS-only HTTP/1.1 JSON boundary with
+bounded requests and timeouts. It provides bearer-token service identities,
+separate admin identities, database allow-list enforcement, consistent query,
+replicated transaction, and database lifecycle/status endpoints. Query SQL is
+restricted to single read-only statements and cannot access Erlite's internal
+tables. Python and PHP examples are provided under `examples/`.
+
 Build:
 
 - network API
