@@ -22,7 +22,13 @@ The barrier binds the Ra machine's applied index and term to its latest retained
 
 ### `erlite_core`
 
-`erlite_core` owns the top-level Erlite supervision tree. It currently starts with no children so later components can be added deliberately with explicit restart and failure semantics.
+`erlite_core` owns the top-level Erlite supervision tree. Phase 4 adds `erlite_database_sup`, a dynamic supervisor with one temporary controller per database, and `erlite_databases`, the serialized local lifecycle coordinator. The coordinator owns a protected, read-concurrent ETS route index. Create and delete remain serialized, while list, status, consistent query, replicated write, and cooling resolve their database controller directly through ETS and therefore do not queue behind an unrelated lifecycle operation. The coordinator refuses reuse of a Ra server ID by another database.
+
+If the lifecycle coordinator restarts, it rebuilds its monitors, placement checks, and ETS routes by enumerating the surviving dynamic-supervisor children and reading their immutable database identity and server IDs. A missing ETS table is reported as registry unavailable rather than as database absence. Cross-node controller lifecycle calls use finite RPC timeouts so an unavailable placement member cannot block the coordinator forever.
+
+Each `erlite_database` owns one explicit three-member Ra group plus one isolated SQLite file per replica root. Phase 4 callers provide the server IDs and storage root; choosing nodes and persisting database placement remain Phase 5 catalog responsibilities. Create rollback tracks exactly which files were made by the current attempt, so encountering a pre-existing file never deletes it.
+
+A cold database closes its SQLite owners but keeps its Ra membership and durable files. Its next read or write reopens every owner, verifies the group's runtime identity, catches the serving replica up through a quorum barrier, and only then serves the operation. Database status reports lifecycle mode, open-owner count, replica file bytes, and sampled controller, SQLite-owner, and Ra-server process memory.
 
 Phase 2 node bootstrap begins with `erlite_node_identity`. The identity is stored under `<storage_path>/node/identity` with owner-only permissions and contains a format version, a stable random 128-bit node ID, and the configured distributed Erlang node name. Creation is exclusive, concurrent creators reload the winner, and malformed, unsupported, or name-conflicting identities fail closed instead of being replaced.
 

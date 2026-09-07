@@ -2,10 +2,12 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
-supervisor_starts_with_no_children_test() ->
+supervisor_starts_database_lifecycle_children_test() ->
     {ok, Pid} = erlite_core_sup:start_link(),
     unlink(Pid),
-    ?assertEqual([], supervisor:which_children(Pid)),
+    Children = supervisor:which_children(Pid),
+    ?assertEqual([erlite_database_sup, erlite_databases],
+                 lists:sort([Id || {Id, _, _, _} <- Children])),
     ok = gen_server:stop(Pid).
 
 application_callback_starts_supervisor_test() ->
@@ -14,4 +16,3 @@ application_callback_starts_supervisor_test() ->
     ?assertEqual(Pid, whereis(erlite_core_sup)),
     ok = gen_server:stop(Pid),
     ?assertEqual(ok, erlite_core_app:stop(undefined)).
-
