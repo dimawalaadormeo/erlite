@@ -50,6 +50,82 @@ identity_collisions_are_rejected_test() ->
                  erlite_catalog_machine:apply(
                    #{index => 1}, {prepare_join, DuplicateName}, State)).
 
+database_lifecycle_is_idempotent_and_generation_fenced_test() ->
+    State0 = catalog_state(),
+    DatabaseId = <<"merchant-1">>,
+    CreateOp = <<1:128>>,
+    DeleteOp = <<2:128>>,
+    Replicas = database_replicas(one),
+    Create = {prepare_database_create, DatabaseId, CreateOp, 1, Replicas},
+    {State1, ok} = erlite_catalog_machine:apply(#{index => 1}, Create, State0),
+    ReorderedCreate = {prepare_database_create, DatabaseId, CreateOp, 1,
+                       lists:reverse(Replicas)},
+    {State1, ok} = erlite_catalog_machine:apply(
+                     #{index => 2}, ReorderedCreate, State1),
+    {ok, #{state := creating, generation := 1}} =
+        erlite_catalog_machine:database(DatabaseId, State1),
+    [#{database_id := DatabaseId}] = erlite_catalog_machine:recoverable(State1),
+    {State2, ok} = erlite_catalog_machine:apply(
+                     #{index => 3},
+                     {mark_database_ready, DatabaseId, CreateOp, 1}, State1),
+    [] = erlite_catalog_machine:recoverable(State2),
+    {State2, {error, {stale_generation, 2, 1}}} =
+        erlite_catalog_machine:apply(
+          #{index => 4},
+          {prepare_database_delete, DatabaseId, <<9:128>>, 2}, State2),
+    {State3, ok} = erlite_catalog_machine:apply(
+                     #{index => 5},
+                     {prepare_database_delete, DatabaseId, DeleteOp, 1}, State2),
+    {State4, ok} = erlite_catalog_machine:apply(
+                     #{index => 6},
+                     {tombstone_database, DatabaseId, DeleteOp, 1}, State3),
+    {State4, ok} = erlite_catalog_machine:apply(
+                     #{index => 7},
+                     {tombstone_database, DatabaseId, DeleteOp, 1}, State4),
+    RecreateOp = <<3:128>>,
+    {State5, ok} = erlite_catalog_machine:apply(
+                     #{index => 8},
+                     {prepare_database_create, DatabaseId, RecreateOp, 2,
+                      database_replicas(two)}, State4),
+    {ok, #{state := creating, generation := 2,
+           operation_id := RecreateOp}} =
+        erlite_catalog_machine:database(DatabaseId, State5).
+
+stale_database_operations_fail_closed_test() ->
+    State0 = catalog_state(),
+    DatabaseId = <<"merchant-2">>,
+    OperationId = <<4:128>>,
+    {State1, ok} = erlite_catalog_machine:apply(
+                     #{index => 1},
+                     {prepare_database_create, DatabaseId, OperationId, 1,
+                      database_replicas(one)}, State0),
+    {State1, {error, {operation_id_conflict, OperationId}}} =
+        erlite_catalog_machine:apply(
+          #{index => 2},
+          {mark_database_ready, DatabaseId, <<5:128>>, 1}, State1),
+    {State1, {error, {invalid_lifecycle_transition, creating, deleting}}} =
+        erlite_catalog_machine:apply(
+          #{index => 3},
+          {prepare_database_delete, DatabaseId, <<7:128>>, 1}, State1),
+    {State1, {error, {stale_generation, 2, 1}}} =
+        erlite_catalog_machine:apply(
+          #{index => 4},
+          {mark_database_ready, DatabaseId, OperationId, 2}, State1),
+    {State1, {error, {operation_id_conflict, OperationId}}} =
+        erlite_catalog_machine:apply(
+          #{index => 5},
+          {prepare_database_create, DatabaseId, <<6:128>>, 1,
+           database_replicas(one)}, State1).
+
+catalog_state() ->
+    erlite_catalog_machine:init(
+      #{cluster_id => <<0:128>>, cluster_name => <<"test">>,
+        nodes => catalog_nodes()}).
+
+database_replicas(Prefix) ->
+    [{list_to_atom("database_" ++ atom_to_list(Prefix) ++ integer_to_list(N)),
+      node()} || N <- [1, 2, 3]].
+
 catalog_nodes() ->
     [#{node_id => <<N:128>>, node_name => integer_to_binary(N),
        server_id => {list_to_atom("catalog_" ++ integer_to_list(N)), node()}}

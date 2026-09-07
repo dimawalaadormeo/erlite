@@ -1,7 +1,7 @@
 -module(erlite_database).
 -behaviour(gen_server).
 
--export([start_link/2]).
+-export([start_link/2, delete_resources/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(RPC_TIMEOUT, 15000).
@@ -9,9 +9,24 @@
 start_link(DatabaseId, Options) ->
     gen_server:start_link(?MODULE, {DatabaseId, Options}, []).
 
+delete_resources(DatabaseId, #{storage_root := StorageRoot,
+                               server_ids := ServerIds}) ->
+    Roots = replica_roots(StorageRoot, ServerIds),
+    case stop_servers(ServerIds) of
+        ok ->
+            ok = close_replicas(DatabaseId, Roots),
+            delete_replicas(DatabaseId, Roots);
+        Error -> Error
+    end;
+delete_resources(_DatabaseId, _Options) -> {error, invalid_database_options}.
+
 init({DatabaseId, #{storage_root := StorageRoot,
                     server_ids := ServerIds} = Options}) ->
-    case open_replicas(StorageRoot, DatabaseId, ServerIds) of
+    Open = case maps:get(ensure_existing, Options, false) of
+               true -> fun ensure_replicas/3;
+               false -> fun open_replicas/3
+           end,
+    case Open(StorageRoot, DatabaseId, ServerIds) of
         {ok, Replicas, Roots, RuntimeIdentity} ->
             ClusterName = cluster_name(DatabaseId),
             case erlite_raft_cluster:start(
@@ -59,9 +74,12 @@ handle_call({query, Sql, Params, Timeout}, _From, State0) ->
 handle_call(delete, _From, State = #{database_id := DatabaseId,
                                      server_ids := ServerIds,
                                      replica_roots := Roots}) ->
-    stop_servers(ServerIds),
-    ok = close_replicas(DatabaseId, Roots),
-    Reply = delete_replicas(DatabaseId, Roots),
+    Reply = case stop_servers(ServerIds) of
+                ok ->
+                    ok = close_replicas(DatabaseId, Roots),
+                    delete_replicas(DatabaseId, Roots);
+                Error -> Error
+            end,
     {stop, normal, Reply, State}.
 
 handle_cast(_Request, State) -> {noreply, State}.
@@ -86,10 +104,7 @@ activate(State = #{database_id := DatabaseId,
     end.
 
 open_replicas(StorageRoot, DatabaseId, ServerIds) ->
-    Roots = maps:from_list(
-              [{ServerId, filename:join(
-                            [StorageRoot, "replicas", integer_to_list(N)])}
-               || {ServerId, N} <- lists:zip(ServerIds, [1, 2, 3])]),
+    Roots = replica_roots(StorageRoot, ServerIds),
     case create_and_open(DatabaseId, maps:to_list(Roots), #{}, undefined, #{}) of
         {ok, Replicas, RuntimeIdentity} ->
             {ok, Replicas, Roots, RuntimeIdentity};
@@ -97,6 +112,55 @@ open_replicas(StorageRoot, DatabaseId, ServerIds) ->
             close_replicas(DatabaseId, CreatedRoots),
             delete_replicas(DatabaseId, CreatedRoots),
             {error, Reason}
+    end.
+
+ensure_replicas(StorageRoot, DatabaseId, ServerIds) ->
+    Roots = replica_roots(StorageRoot, ServerIds),
+    case ensure_and_open(DatabaseId, maps:to_list(Roots), #{}, undefined, #{}) of
+        {ok, Replicas, RuntimeIdentity} ->
+            {ok, Replicas, Roots, RuntimeIdentity};
+        {error, Reason, CreatedRoots} ->
+            close_replicas(DatabaseId, Roots),
+            delete_replicas(DatabaseId, CreatedRoots),
+            {error, Reason}
+    end.
+
+replica_roots(StorageRoot, ServerIds) ->
+    maps:from_list(
+      [{ServerId, filename:join(
+                    [StorageRoot, "replicas", integer_to_list(N)])}
+       || {ServerId, N} <- lists:zip(ServerIds, [1, 2, 3])]).
+
+ensure_and_open(_DatabaseId, [], Replicas, RuntimeIdentity, _CreatedRoots) ->
+    {ok, Replicas, RuntimeIdentity};
+ensure_and_open(DatabaseId, [{ServerId, Root} | Rest], Replicas, Expected,
+                CreatedRoots) ->
+    case member_call(ServerId, erlite_sqlite_databases, create,
+                     [Root, DatabaseId]) of
+        ok ->
+            ensure_opened(DatabaseId, ServerId, Root, Rest, Replicas, Expected,
+                          CreatedRoots#{ServerId => Root});
+        {error, database_exists} ->
+            ensure_opened(DatabaseId, ServerId, Root, Rest, Replicas, Expected,
+                          CreatedRoots);
+        {error, Reason} -> {error, Reason, CreatedRoots}
+    end.
+
+ensure_opened(DatabaseId, ServerId, Root, Rest, Replicas, Expected,
+              CreatedRoots) ->
+    case member_call(ServerId, erlite_sqlite_databases, open,
+                     [Root, DatabaseId]) of
+        {ok, Owner} ->
+            case erlite_sqlite_owner:runtime_identity(Owner) of
+                {ok, Identity} when Expected =:= undefined; Identity =:= Expected ->
+                    ensure_and_open(DatabaseId, Rest,
+                                    Replicas#{ServerId => Owner}, Identity,
+                                    CreatedRoots);
+                {ok, _Different} ->
+                    {error, incompatible_sqlite_runtime, CreatedRoots};
+                {error, Reason} -> {error, Reason, CreatedRoots}
+            end;
+        {error, Reason} -> {error, Reason, CreatedRoots}
     end.
 
 create_and_open(_DatabaseId, [], Replicas, RuntimeIdentity, _CreatedRoots) ->
@@ -205,10 +269,16 @@ delete_replicas(DatabaseId, Roots) ->
     end.
 
 stop_servers(ServerIds) ->
-    lists:foreach(fun(ServerId) ->
-                          _ = member_call(ServerId, ra, force_delete_server,
-                                          [default, ServerId])
-                  end, ServerIds).
+    Results = [member_call(ServerId, ra, force_delete_server,
+                           [default, ServerId]) || ServerId <- ServerIds],
+    case [Error || Error <- Results, not benign_delete_result(Error)] of
+        [] -> ok;
+        [Error | _] -> Error
+    end.
+
+benign_delete_result(ok) -> true;
+benign_delete_result({error, not_found}) -> true;
+benign_delete_result(_) -> false.
 
 member_call({_, Node}, Module, Function, Arguments) when Node =:= node() ->
     erlang:apply(Module, Function, Arguments);

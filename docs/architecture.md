@@ -28,6 +28,12 @@ If the lifecycle coordinator restarts, it rebuilds its monitors, placement check
 
 Each `erlite_database` owns one explicit three-member Ra group plus one isolated SQLite file per replica root. Phase 4 callers provide the server IDs and storage root; choosing nodes and persisting database placement remain Phase 5 catalog responsibilities. Create rollback tracks exactly which files were made by the current attempt, so encountering a pre-existing file never deletes it.
 
+Phase 5 adds the supervised `erlite_database_router`. It is configured with the catalog Ra server reference and resolves an application-supplied `DatabaseId` through a consistent catalog query. Only `ready` records are routable. Leader discovery asks the database's Ra members for their current leader and accepts the result only when it belongs to both the live membership response and the catalog replica set.
+
+The router maintains a protected, read-concurrent ETS cache containing the observed generation, catalog record, and discovered leader. This cache is a local hint for reuse and inspection; route authorization always performs a fresh consistent catalog lookup. Reconfiguration clears the cache and changes an epoch token, so delayed updates produced under an older catalog configuration cannot repopulate it.
+
+The supervised `erlite_database_lifecycle` service is the Phase 5 control path. Create and delete accept only a `DatabaseId`. Create chooses three active catalog nodes, derives generation-specific Ra server IDs, commits `creating`, idempotently ensures the physical SQLite replicas and Ra group, and only then commits `ready`. Delete commits `deleting`, retires the local controller, Ra servers, and SQLite replicas, and only then commits `tombstoned`. On configuration or restart it consistently queries all incomplete catalog records and resumes them. The physical ensure operation can reopen a complete durable replica set or finish a partially created set without deleting pre-existing replicas during rollback.
+
 A cold database closes its SQLite owners but keeps its Ra membership and durable files. Its next read or write reopens every owner, verifies the group's runtime identity, catches the serving replica up through a quorum barrier, and only then serves the operation. Database status reports lifecycle mode, open-owner count, replica file bytes, and sampled controller, SQLite-owner, and Ra-server process memory.
 
 Phase 2 node bootstrap begins with `erlite_node_identity`. The identity is stored under `<storage_path>/node/identity` with owner-only permissions and contains a format version, a stable random 128-bit node ID, and the configured distributed Erlang node name. Creation is exclusive, concurrent creators reload the winner, and malformed, unsupported, or name-conflicting identities fail closed instead of being replaced.
@@ -37,6 +43,8 @@ Phase 2 node bootstrap begins with `erlite_node_identity`. The identity is store
 ### `erlite_catalog`
 
 The Phase 2 cluster catalog is a dedicated RabbitMQ `ra` group that bootstraps with one member and must expand to three before it is production-ready. Its replicated state binds the cluster ID and name to unique persistent node IDs, node names, and Ra server IDs, and records target RF=3 with quorum=2. Catalog status uses a Ra consistent query; local status is explicitly separate and may be stale.
+
+Phase 5 extends that same authoritative group with per-database records. A record contains `DatabaseId`, lifecycle state, a 128-bit operation ID, monotonically increasing placement generation, exactly three Ra server IDs, replication factor, and schema version. Catalog commands prepare creation, publish readiness, prepare deletion, and publish a tombstone; consistent lookup and incomplete-work discovery expose the state required by routing and reconciliation.
 
 Catalog join and leave are staged workflows. Join first records `joining`, starts the new Ra server, commits Ra membership, verifies that member can read caught-up local machine state, and only then records `active`. Leave records `leaving`, uses Ra's consensus-backed leave-and-delete operation, and finalizes removal through surviving members. Phase 2 refuses a leave that would reduce active catalog nodes below three; later automatic replacement must add and verify a replacement before removal.
 

@@ -1,9 +1,11 @@
 -module(erlite_database_SUITE).
 
 -export([all/0, init_per_suite/1, end_per_suite/1,
-         multiple_database_lifecycle_and_isolation/1]).
+         multiple_database_lifecycle_and_isolation/1,
+         catalog_lifecycle_reconciles_interrupted_work/1]).
 
-all() -> [multiple_database_lifecycle_and_isolation].
+all() -> [multiple_database_lifecycle_and_isolation,
+          catalog_lifecycle_reconciles_interrupted_work].
 
 init_per_suite(Config) ->
     Root = filename:join(
@@ -16,14 +18,80 @@ init_per_suite(Config) ->
     ok = application:start(erlite_raft),
     {ok, Sup} = erlite_core_sup:start_link(),
     unlink(Sup),
-    [{root, Root}, {supervisor, Sup} | Config].
+    CatalogNodes = catalog_nodes(),
+    {ok, CatalogServers, []} = erlite_catalog:start(
+                                 crypto:strong_rand_bytes(16),
+                                 <<"phase5-lifecycle-test">>, CatalogNodes),
+    Catalog = hd(CatalogServers),
+    ok = erlite_database_lifecycle:configure(Catalog, Root),
+    [{root, Root}, {supervisor, Sup}, {catalog, Catalog},
+     {catalog_servers, CatalogServers} | Config].
 
 end_per_suite(Config) ->
+    lists:foreach(fun(ServerId) ->
+                          _ = ra:force_delete_server(default, ServerId)
+                  end, lifecycle_server_ids() ++
+                       proplists:get_value(catalog_servers, Config)),
     Sup = proplists:get_value(supervisor, Config),
     ok = gen_server:stop(Sup, normal, 5000),
     _ = application:stop(erlite_raft),
     _ = application:stop(ra),
     cleanup(proplists:get_value(root, Config)),
+    ok.
+
+catalog_lifecycle_reconciles_interrupted_work(Config) ->
+    Catalog = proplists:get_value(catalog, Config),
+    PublicDatabaseId = <<"phase5-public-api">>,
+    ok = erlite_database_lifecycle:create(PublicDatabaseId),
+    {ok, #{state := ready}} = erlite_catalog:database(
+                                 Catalog, PublicDatabaseId, 15000, consistent),
+    ok = erlite_database_lifecycle:delete(PublicDatabaseId),
+    {ok, #{state := tombstoned}} = erlite_catalog:database(
+                                      Catalog, PublicDatabaseId, 15000,
+                                      consistent),
+    DatabaseId = <<"phase5-recovery">>,
+    CreateOp = <<51:128>>,
+    DeleteOp = <<52:128>>,
+    Replicas = lifecycle_server_ids(),
+    ok = erlite_catalog:prepare_database_create(
+           Catalog, DatabaseId, CreateOp, 1, Replicas, 15000),
+    Root = proplists:get_value(root, Config),
+    ok = erlite_sqlite_databases:create(
+           filename:join([Root, "replicas", "1"]), DatabaseId),
+    OldLifecycle = whereis(erlite_database_lifecycle),
+    exit(OldLifecycle, kill),
+    _NewLifecycle = await_process_restart(
+                      erlite_database_lifecycle, OldLifecycle, 5000),
+    ok = await_catalog_state(Catalog, DatabaseId, ready, 15000),
+    {ok, [DatabaseId]} = erlite_databases:list(),
+    ok = erlite_catalog:prepare_database_delete(
+           Catalog, DatabaseId, DeleteOp, 1, 15000),
+    ok = supervisor:terminate_child(erlite_database_sup, DatabaseId),
+    {error, not_found} = supervisor:delete_child(
+                           erlite_database_sup, DatabaseId),
+    OldRegistry = whereis(erlite_databases),
+    exit(OldRegistry, kill),
+    _ = await_registry_restart(OldRegistry, 5000),
+    {ok, []} = erlite_databases:list(),
+    DeleteLifecycle = whereis(erlite_database_lifecycle),
+    exit(DeleteLifecycle, kill),
+    _ = await_process_restart(
+          erlite_database_lifecycle, DeleteLifecycle, 5000),
+    ok = await_catalog_state(Catalog, DatabaseId, tombstoned, 15000),
+    {ok, []} = erlite_databases:list(),
+    false = lists:any(
+              fun(N) ->
+                      {ok, Path} = erlite_sqlite_database:path(
+                                     filename:join(
+                                       [Root, "replicas", integer_to_list(N)]),
+                                     DatabaseId),
+                      filelib:is_file(Path)
+              end, [1, 2, 3]),
+    true = lists:all(
+             fun({Name, _Node}) ->
+                     undefined =:= ra_directory:where_is(default, Name)
+             end, Replicas),
+    ok = erlite_database_lifecycle:delete(DatabaseId),
     ok.
 
 multiple_database_lifecycle_and_isolation(Config) ->
@@ -110,4 +178,49 @@ await_registry_restart(OldPid, Deadline, _Pid) ->
             timer:sleep(10),
             await_registry_restart(
               OldPid, Deadline, whereis(erlite_databases))
+    end.
+
+catalog_nodes() ->
+    [#{node_id => <<N:128>>, node_name => integer_to_binary(N),
+       server_id => ServerId}
+     || {N, ServerId} <- lists:zip([41, 42, 43], catalog_server_ids())].
+
+catalog_server_ids() ->
+    [{Name, node()} || Name <- [erlite_lifecycle_catalog_1,
+                                erlite_lifecycle_catalog_2,
+                                erlite_lifecycle_catalog_3]].
+
+lifecycle_server_ids() ->
+    [{Name, node()} || Name <- [erlite_lifecycle_db_1,
+                                erlite_lifecycle_db_2,
+                                erlite_lifecycle_db_3]].
+
+await_process_restart(Name, OldPid, Timeout) ->
+    Deadline = erlang:monotonic_time(millisecond) + Timeout,
+    await_process_restart(Name, OldPid, Deadline, whereis(Name)).
+
+await_process_restart(_Name, OldPid, _Deadline, Pid)
+  when is_pid(Pid), Pid =/= OldPid -> Pid;
+await_process_restart(Name, OldPid, Deadline, _Pid) ->
+    case erlang:monotonic_time(millisecond) >= Deadline of
+        true -> ct:fail({process_did_not_restart, Name});
+        false ->
+            timer:sleep(10),
+            await_process_restart(Name, OldPid, Deadline, whereis(Name))
+    end.
+
+await_catalog_state(Catalog, DatabaseId, Expected, Timeout) ->
+    Deadline = erlang:monotonic_time(millisecond) + Timeout,
+    await_catalog_state(Catalog, DatabaseId, Expected, Deadline, undefined).
+
+await_catalog_state(_Catalog, _DatabaseId, Expected, _Deadline,
+                    {ok, #{state := Expected}}) -> ok;
+await_catalog_state(Catalog, DatabaseId, Expected, Deadline, Last) ->
+    case erlang:monotonic_time(millisecond) >= Deadline of
+        true -> ct:fail({catalog_state_timeout, Expected, Last});
+        false ->
+            timer:sleep(20),
+            Result = erlite_catalog:database(
+                       Catalog, DatabaseId, 15000, consistent),
+            await_catalog_state(Catalog, DatabaseId, Expected, Deadline, Result)
     end.

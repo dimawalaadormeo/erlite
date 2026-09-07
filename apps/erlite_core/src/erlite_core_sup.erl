@@ -11,12 +11,18 @@ start_link() ->
 -spec init([]) -> {ok, {supervisor:sup_flags(), [supervisor:child_spec()]}}.
 init([]) ->
     SupFlags = #{strategy => one_for_one,
-                 intensity => 1,
+                 intensity => 10,
                  period => 5},
     Children = [#{id => erlite_database_sup,
                   start => {erlite_database_sup, start_link, []},
                   type => supervisor},
                 #{id => erlite_databases,
                   start => {erlite_databases, start_link, []},
+                  type => worker},
+                #{id => erlite_database_router,
+                  start => {erlite_database_router, start_link, []},
+                  type => worker},
+                #{id => erlite_database_lifecycle,
+                  start => {erlite_database_lifecycle, start_link, []},
                   type => worker}],
     {ok, {SupFlags, Children}}.

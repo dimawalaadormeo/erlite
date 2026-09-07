@@ -1,6 +1,9 @@
 -module(erlite_catalog).
 
--export([start/3, status/3, join/3, leave/3]).
+-export([start/3, status/3, join/3, leave/3,
+         prepare_database_create/6, mark_database_ready/5,
+         prepare_database_delete/5, tombstone_database/5,
+         database/4, recoverable_databases/3]).
 
 -spec start(binary(), binary(), [map()]) ->
     {ok, [term()], [term()]} | {error, term()}.
@@ -24,6 +27,58 @@ status(ServerId, Timeout, consistent) ->
 status(ServerId, Timeout, local) ->
     normalize_query(ra:local_query(
                       ServerId, {erlite_catalog_machine, status, []}, Timeout)).
+
+-spec prepare_database_create(term(), binary(), binary(), pos_integer(),
+                              [term()], timeout()) ->
+    ok | {error, term()} | {timeout, term()}.
+prepare_database_create(ServerRef, DatabaseId, OperationId, Generation,
+                        Replicas, Timeout) ->
+    command(ServerRef,
+            {prepare_database_create, DatabaseId, OperationId, Generation,
+             Replicas}, Timeout).
+
+-spec mark_database_ready(term(), binary(), binary(), pos_integer(), timeout()) ->
+    ok | {error, term()} | {timeout, term()}.
+mark_database_ready(ServerRef, DatabaseId, OperationId, Generation, Timeout) ->
+    command(ServerRef,
+            {mark_database_ready, DatabaseId, OperationId, Generation}, Timeout).
+
+-spec prepare_database_delete(term(), binary(), binary(), pos_integer(),
+                              timeout()) ->
+    ok | {error, term()} | {timeout, term()}.
+prepare_database_delete(ServerRef, DatabaseId, OperationId, Generation,
+                        Timeout) ->
+    command(ServerRef,
+            {prepare_database_delete, DatabaseId, OperationId, Generation},
+            Timeout).
+
+-spec tombstone_database(term(), binary(), binary(), pos_integer(), timeout()) ->
+    ok | {error, term()} | {timeout, term()}.
+tombstone_database(ServerRef, DatabaseId, OperationId, Generation, Timeout) ->
+    command(ServerRef,
+            {tombstone_database, DatabaseId, OperationId, Generation}, Timeout).
+
+-spec database(term(), binary(), timeout(), consistent | local) ->
+    {ok, map()} | {error, term()} | {timeout, term()}.
+database(ServerId, DatabaseId, Timeout, consistent) ->
+    normalize_value_query(
+      ra:consistent_query(
+        ServerId, {erlite_catalog_machine, database, [DatabaseId]}, Timeout));
+database(ServerId, DatabaseId, Timeout, local) ->
+    normalize_value_query(
+      ra:local_query(
+        ServerId, {erlite_catalog_machine, database, [DatabaseId]}, Timeout)).
+
+-spec recoverable_databases(term(), timeout(), consistent | local) ->
+    {ok, [map()]} | {error, term()} | {timeout, term()}.
+recoverable_databases(ServerId, Timeout, consistent) ->
+    normalize_value_query(
+      ra:consistent_query(
+        ServerId, {erlite_catalog_machine, recoverable, []}, Timeout));
+recoverable_databases(ServerId, Timeout, local) ->
+    normalize_value_query(
+      ra:local_query(
+        ServerId, {erlite_catalog_machine, recoverable, []}, Timeout)).
 
 -spec join(term(), map(), timeout()) -> ok | {error, term()} | {timeout, term()}.
 join(ServerRef, Node = #{server_id := NewServerId}, Timeout) ->
@@ -171,6 +226,14 @@ normalize_query({ok, {_IndexTerm, Status}, _Leader}) when is_map(Status) ->
 normalize_query({ok, Status, _Leader}) when is_map(Status) ->
     {ok, Status};
 normalize_query(Other) -> Other.
+
+normalize_value_query({ok, {_IndexTerm, {ok, Value}}, _Leader}) -> {ok, Value};
+normalize_value_query({ok, {_IndexTerm, {error, _} = Error}, _Leader}) -> Error;
+normalize_value_query({ok, {ok, Value}, _Leader}) -> {ok, Value};
+normalize_value_query({ok, {error, _} = Error, _Leader}) -> Error;
+normalize_value_query({ok, {_IndexTerm, Value}, _Leader}) -> {ok, Value};
+normalize_value_query({ok, Value, _Leader}) -> {ok, Value};
+normalize_value_query(Other) -> Other.
 
 validate(ClusterId, ClusterName, Nodes)
   when is_binary(ClusterId), byte_size(ClusterId) =:= 16,
