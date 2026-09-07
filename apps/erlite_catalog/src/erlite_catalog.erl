@@ -3,6 +3,8 @@
 -export([start/3, status/3, join/3, leave/3,
          prepare_database_create/6, mark_database_ready/5,
          prepare_database_delete/5, tombstone_database/5,
+         prepare_database_move/7, mark_database_replacement_ready/5,
+         finish_database_move/5,
          database/4, recoverable_databases/3]).
 
 -spec start(binary(), binary(), [map()]) ->
@@ -57,6 +59,31 @@ prepare_database_delete(ServerRef, DatabaseId, OperationId, Generation,
 tombstone_database(ServerRef, DatabaseId, OperationId, Generation, Timeout) ->
     command(ServerRef,
             {tombstone_database, DatabaseId, OperationId, Generation}, Timeout).
+
+-spec prepare_database_move(term(), binary(), binary(), pos_integer(), term(),
+                            term(), timeout()) ->
+    ok | {error, term()} | {timeout, term()}.
+prepare_database_move(ServerRef, DatabaseId, OperationId, Generation, Source,
+                      Replacement, Timeout) ->
+    command(ServerRef,
+            {prepare_database_move, DatabaseId, OperationId, Generation,
+             Source, Replacement}, Timeout).
+
+-spec mark_database_replacement_ready(term(), binary(), binary(),
+                                      pos_integer(), timeout()) ->
+    ok | {error, term()} | {timeout, term()}.
+mark_database_replacement_ready(ServerRef, DatabaseId, OperationId, Generation,
+                                Timeout) ->
+    command(ServerRef,
+            {mark_database_replacement_ready, DatabaseId, OperationId,
+             Generation}, Timeout).
+
+-spec finish_database_move(term(), binary(), binary(), pos_integer(), timeout()) ->
+    ok | {error, term()} | {timeout, term()}.
+finish_database_move(ServerRef, DatabaseId, OperationId, Generation, Timeout) ->
+    command(ServerRef,
+            {finish_database_move, DatabaseId, OperationId, Generation},
+            Timeout).
 
 -spec database(term(), binary(), timeout(), consistent | local) ->
     {ok, map()} | {error, term()} | {timeout, term()}.

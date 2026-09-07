@@ -117,6 +117,79 @@ stale_database_operations_fail_closed_test() ->
           {prepare_database_create, DatabaseId, <<6:128>>, 1,
            database_replicas(one)}, State1).
 
+database_move_is_durable_idempotent_and_ordered_test() ->
+    DatabaseId = <<"merchant-move">>,
+    Replicas = database_replicas(one),
+    Source = hd(Replicas),
+    Replacement = {database_replacement, node()},
+    State0 = ready_database(DatabaseId, <<8:128>>, Replicas),
+    Prepare = {prepare_database_move, DatabaseId, <<9:128>>, 1, Source,
+               Replacement},
+    {State1, ok} = erlite_catalog_machine:apply(#{index => 3}, Prepare, State0),
+    {State1, ok} = erlite_catalog_machine:apply(#{index => 4}, Prepare, State1),
+    {ok, #{state := ready, replicas := Replicas,
+           movement := #{phase := adding}}} =
+        erlite_catalog_machine:database(DatabaseId, State1),
+    [#{database_id := DatabaseId}] = erlite_catalog_machine:recoverable(State1),
+    {State1, {error, {invalid_movement_transition, adding}}} =
+        erlite_catalog_machine:apply(
+          #{index => 5}, {finish_database_move, DatabaseId, <<9:128>>, 1}, State1),
+    Ready = {mark_database_replacement_ready, DatabaseId, <<9:128>>, 1},
+    {State2, ok} = erlite_catalog_machine:apply(#{index => 6}, Ready, State1),
+    {State2, ok} = erlite_catalog_machine:apply(#{index => 7}, Ready, State2),
+    Finish = {finish_database_move, DatabaseId, <<9:128>>, 1},
+    {State3, ok} = erlite_catalog_machine:apply(#{index => 8}, Finish, State2),
+    {State3, ok} = erlite_catalog_machine:apply(#{index => 9}, Finish, State3),
+    {ok, Final} = erlite_catalog_machine:database(DatabaseId, State3),
+    2 = maps:get(generation, Final),
+    false = maps:is_key(movement, Final),
+    false = lists:member(Source, maps:get(replicas, Final)),
+    true = lists:member(Replacement, maps:get(replicas, Final)),
+    [] = erlite_catalog_machine:recoverable(State3).
+
+delete_is_fenced_while_database_move_is_in_progress_test() ->
+    DatabaseId = <<"merchant-moving-delete">>,
+    Replicas = database_replicas(one),
+    State0 = ready_database(DatabaseId, <<12:128>>, Replicas),
+    {State1, ok} = erlite_catalog_machine:apply(
+                     #{index => 3},
+                     {prepare_database_move, DatabaseId, <<13:128>>, 1,
+                      hd(Replicas), {replacement, node()}}, State0),
+    {State1, {error, {movement_in_progress, <<13:128>>}}} =
+        erlite_catalog_machine:apply(
+          #{index => 4},
+          {prepare_database_delete, DatabaseId, <<14:128>>, 1}, State1).
+
+database_move_rejects_unsafe_replacement_test() ->
+    DatabaseId = <<"merchant-move-fences">>,
+    Replicas = database_replicas(one),
+    State = ready_database(DatabaseId, <<10:128>>, Replicas),
+    {State, {error, source_not_in_placement}} = erlite_catalog_machine:apply(
+      #{index => 3},
+      {prepare_database_move, DatabaseId, <<11:128>>, 1,
+       {missing, node()}, {replacement, node()}}, State),
+    {State, {error, replacement_already_in_placement}} =
+        erlite_catalog_machine:apply(
+          #{index => 4},
+          {prepare_database_move, DatabaseId, <<11:128>>, 1, hd(Replicas),
+           lists:last(Replicas)}, State),
+    {State, {error, replacement_unavailable}} =
+        erlite_catalog_machine:apply(
+          #{index => 5},
+          {prepare_database_move, DatabaseId, <<11:128>>, 1, hd(Replicas),
+           {replacement, 'not-active@host'}}, State).
+
+ready_database(DatabaseId, OperationId, Replicas) ->
+    State0 = catalog_state(),
+    {State1, ok} = erlite_catalog_machine:apply(
+                     #{index => 1},
+                     {prepare_database_create, DatabaseId, OperationId, 1,
+                      Replicas}, State0),
+    {State2, ok} = erlite_catalog_machine:apply(
+                     #{index => 2},
+                     {mark_database_ready, DatabaseId, OperationId, 1}, State1),
+    State2.
+
 catalog_state() ->
     erlite_catalog_machine:init(
       #{cluster_id => <<0:128>>, cluster_name => <<"test">>,

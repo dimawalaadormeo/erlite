@@ -874,18 +874,20 @@ Build:
 
 Provide PHP and Python examples.
 
-**Development checkpoint (2026-09-07):** Work is paused at the Phase 6/Phase 7
-boundary. Phase 6 and its follow-up review fixes are complete, including
-exception-safe HTTP parsing, engine-enforced read-only queries, and fail-closed
-handling when SQLite writable mode cannot be restored. Final verification
-completed 77 EUnit tests and 10 distributed Common Test cases. Resume with
-Phase 7 node expansion and durable database movement.
+**Development checkpoint (2026-09-08):** Phase 7 is complete. Final verification
+completed 80 EUnit tests and 14 Common Test cases, including real peer-node
+expansion, movement, and crash reconciliation. Resume with Phase 8 automatic
+replica repair.
 
 ### Phase 7 — Node expansion and database movement
+
+**Status: complete**
 
 Test 3 -> 4 nodes, then 4 -> 6 nodes.
 
 Movement must be durable, resumable, serialized per database, and tested with crashes before and after every membership-transition step.
+
+Phase 7 provides explicit, per-database movement to an active target node. The workflow durably bootstraps a verified SQLite snapshot, adds and catches up the replacement Ra member, removes the source only after replacement readiness, advances the placement generation, and reconciles interruption around membership changes. Real peer-node Common Tests cover expansion from 3 to 4 and 4 to 6 nodes, preserved data, final RF=3 membership, and controller/lifecycle crashes before and after membership transitions.
 
 ### Phase 8 — Automatic replica repair
 

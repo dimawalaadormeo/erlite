@@ -21,15 +21,17 @@ delete_resources(DatabaseId, #{storage_root := StorageRoot,
 delete_resources(_DatabaseId, _Options) -> {error, invalid_database_options}.
 
 init({DatabaseId, #{storage_root := StorageRoot,
-                    server_ids := ServerIds} = Options}) ->
-    Open = case maps:get(ensure_existing, Options, false) of
-               true -> fun ensure_replicas/3;
-               false -> fun open_replicas/3
-           end,
-    case Open(StorageRoot, DatabaseId, ServerIds) of
+                    server_ids := ConfiguredServerIds} = Options}) ->
+    ServerIds = effective_server_ids(ConfiguredServerIds, Options),
+    case open_for_init(StorageRoot, DatabaseId, ConfiguredServerIds,
+                       ServerIds, Options) of
         {ok, Replicas, Roots, RuntimeIdentity} ->
             ClusterName = cluster_name(DatabaseId),
-            case ensure_raft_cluster(ClusterName, ServerIds, RuntimeIdentity) of
+            AllowedMembers = lists:usort(
+                               ServerIds ++
+                               maps:get(allowed_extra_server_ids, Options, [])),
+            case ensure_raft_cluster(ClusterName, ServerIds, AllowedMembers,
+                                     RuntimeIdentity) of
                 {ok, _Started, []} ->
                     {ok, #{database_id => DatabaseId,
                            storage_root => StorageRoot,
@@ -47,10 +49,60 @@ init({DatabaseId, #{storage_root := StorageRoot,
     end;
 init({_DatabaseId, _Options}) -> {stop, invalid_database_options}.
 
-ensure_raft_cluster(ClusterName, ServerIds, RuntimeIdentity) ->
+open_for_init(StorageRoot, DatabaseId, ConfiguredServerIds, ServerIds,
+              Options = #{movement := _}) ->
+    Roots = movement_replica_roots(StorageRoot, ConfiguredServerIds,
+                                   ServerIds, Options),
+    ensure_replicas_with_roots(DatabaseId, Roots);
+open_for_init(StorageRoot, DatabaseId, _ConfiguredServerIds, ServerIds,
+              Options) ->
+    case maps:get(ensure_existing, Options, false) of
+        true -> ensure_replicas(StorageRoot, DatabaseId, ServerIds);
+        false -> open_replicas(StorageRoot, DatabaseId, ServerIds)
+    end.
+
+movement_replica_roots(StorageRoot, ConfiguredServerIds, ServerIds,
+                       #{movement := #{replacement := Replacement}}) ->
+    OldRoots = replica_roots(StorageRoot, ConfiguredServerIds),
+    AllRoots = OldRoots#{Replacement => replacement_root(StorageRoot,
+                                                          Replacement)},
+    maps:with(ServerIds, AllRoots).
+
+ensure_replicas_with_roots(DatabaseId, Roots) ->
+    case ensure_and_open(DatabaseId, maps:to_list(Roots), #{}, undefined, #{}) of
+        {ok, Replicas, RuntimeIdentity} ->
+            {ok, Replicas, Roots, RuntimeIdentity};
+        {error, Reason, CreatedRoots} ->
+            close_replicas(DatabaseId, Roots),
+            delete_replicas(DatabaseId, CreatedRoots),
+            {error, Reason}
+    end.
+
+effective_server_ids(ServerIds,
+                     #{movement := #{source := Source,
+                                     replacement := Replacement}}) ->
+    Candidates = lists:usort([Replacement | ServerIds]),
+    case ra:members(Candidates, 5000) of
+        {ok, Members, _Leader} ->
+            Canonical = lists:sort(Members),
+            Old = lists:sort(ServerIds),
+            Four = lists:sort(Candidates),
+            Final = lists:sort([Replacement | lists:delete(Source, ServerIds)]),
+            case Canonical of
+                Old -> Old;
+                Four -> ServerIds ++ [Replacement];
+                Final -> lists:delete(Source, ServerIds) ++ [Replacement];
+                _ -> ServerIds
+            end;
+        _ -> ServerIds
+    end;
+effective_server_ids(ServerIds, _Options) -> ServerIds.
+
+ensure_raft_cluster(ClusterName, ServerIds, AllowedMembers, RuntimeIdentity) ->
     case ra:members(ServerIds, 5000) of
         {ok, Members, _Leader} ->
-            case lists:sort(Members) =:= lists:sort(ServerIds) of
+            case lists:sort(Members) =:= lists:sort(ServerIds) orelse
+                 lists:sort(Members) =:= lists:sort(AllowedMembers) of
                 true -> {ok, [], []};
                 false -> {error, {raft_membership_mismatch,
                                   lists:sort(ServerIds), lists:sort(Members)}}
@@ -82,6 +134,22 @@ handle_call({query, Sql, Params, Timeout}, _From, State0) ->
               {erlite_raft_database:consistent_read(
                  ServerIds, Sql, Params, Replicas, Timeout), State}
       end);
+handle_call({add_replacement, Source, Replacement, Generation, Timeout},
+            _From, State0) ->
+    case activate(State0) of
+        {ok, State} ->
+            case add_replacement(Source, Replacement, Generation, Timeout,
+                                 State) of
+                {ok, NewState} -> {reply, ok, NewState};
+                {error, _Reason} = Error -> {reply, Error, State}
+            end;
+        {error, Reason} -> {reply, {error, Reason}, State0}
+    end;
+handle_call({remove_source, Source, Replacement, Timeout}, _From, State) ->
+    case remove_source(Source, Replacement, Timeout, State) of
+        {ok, NewState} -> {reply, ok, NewState};
+        {error, _Reason} = Error -> {reply, Error, State}
+    end;
 handle_call(delete, _From, State = #{database_id := DatabaseId,
                                      server_ids := ServerIds,
                                      replica_roots := Roots}) ->
@@ -96,6 +164,234 @@ handle_call(delete, _From, State = #{database_id := DatabaseId,
 handle_cast(_Request, State) -> {noreply, State}.
 handle_info(_Info, State) -> {noreply, State}.
 terminate(_Reason, _State) -> ok.
+
+add_replacement(Source, Replacement, Generation, Timeout,
+                State = #{database_id := DatabaseId,
+                          storage_root := StorageRoot,
+                          server_ids := ServerIds,
+                          replicas := Replicas,
+                          replica_roots := Roots,
+                          runtime_identity := RuntimeIdentity}) ->
+    case {lists:member(Replacement, ServerIds),
+          maps:find(Replacement, Replicas)} of
+        {true, {ok, _ReplacementOwner}} ->
+            case erlite_raft_database:readiness(
+                   ServerIds, Replicas, Replacement, Timeout) of
+                {ok, ready, _Index} -> {ok, State};
+                Other -> Other
+            end;
+        _ -> add_new_replacement(Source, Replacement, Generation, Timeout,
+                                 DatabaseId, StorageRoot, ServerIds, Replicas,
+                                 Roots, RuntimeIdentity, State)
+    end.
+
+add_new_replacement(Source, Replacement, Generation, Timeout, DatabaseId,
+                    StorageRoot, ServerIds, Replicas, Roots, RuntimeIdentity,
+                    State) ->
+    case {lists:member(Source, ServerIds), maps:find(Source, Replicas)} of
+        {false, _} -> {error, source_not_in_placement};
+        {_, error} -> {error, {replica_owner_unavailable, Source}};
+        {true, {ok, SourceOwner}} ->
+            ReplacementRoot = replacement_root(StorageRoot, Replacement),
+            case bootstrap_replacement(ServerIds, Source, SourceOwner,
+                                       Replacement, ReplacementRoot, DatabaseId,
+                                       Generation, RuntimeIdentity, Timeout) of
+                {ok, ReplacementOwner} ->
+                    {ok, State#{server_ids => lists:usort(
+                                             [Replacement | ServerIds]),
+                                replicas => Replicas#{Replacement =>
+                                                          ReplacementOwner},
+                                replica_roots => Roots#{Replacement =>
+                                                            ReplacementRoot}}};
+                Error -> Error
+            end
+    end.
+
+bootstrap_replacement(ServerIds, Source, SourceOwner, Replacement,
+                      ReplacementRoot, DatabaseId, Generation,
+                      RuntimeIdentity, Timeout) ->
+    case erlite_raft_cluster:barrier(ServerIds, Timeout) of
+        {ok, Barrier, _Leader} ->
+            case erlite_raft_applier:catch_up(
+                   Source, SourceOwner, Barrier, Timeout) of
+                {ok, _} ->
+                    transfer_bootstrap_snapshot(
+                      ServerIds, Source, SourceOwner, Replacement,
+                      ReplacementRoot, DatabaseId, Generation,
+                      RuntimeIdentity, Barrier, Timeout);
+                Other -> Other
+            end;
+        Other -> Other
+    end.
+
+transfer_bootstrap_snapshot(ServerIds, Source, SourceOwner, Replacement,
+                            ReplacementRoot, DatabaseId, Generation,
+                            RuntimeIdentity, Barrier, Timeout) ->
+    SnapshotRoot = filename:join(ReplacementRoot, "movement-source"),
+    Index = maps:get(command_index, Barrier),
+    Term = maps:get(command_term, Barrier),
+    case member_call(Source, erlite_raft_snapshot, create,
+                     [SourceOwner, SnapshotRoot, DatabaseId, Generation,
+                      Index, Term, 0]) of
+        {ok, ManifestPath} ->
+            case erlite_raft_snapshot:transfer(
+                   Source, Replacement, ManifestPath) of
+                {ok, ReceivedManifest} ->
+                    install_and_join_replacement(
+                      ServerIds, Replacement, ReplacementRoot, DatabaseId,
+                      Generation, RuntimeIdentity, ReceivedManifest, Timeout);
+                Error -> Error
+            end;
+        {error, snapshot_exists} ->
+            ManifestPath = filename:join(
+                             SnapshotRoot,
+                             snapshot_manifest_name(DatabaseId, Generation,
+                                                    Index)),
+            case erlite_raft_snapshot:transfer(
+                   Source, Replacement, ManifestPath) of
+                {ok, ReceivedManifest} ->
+                    install_and_join_replacement(
+                      ServerIds, Replacement, ReplacementRoot, DatabaseId,
+                      Generation, RuntimeIdentity, ReceivedManifest, Timeout);
+                Error -> Error
+            end;
+        Error -> Error
+    end.
+
+install_and_join_replacement(ServerIds, Replacement, ReplacementRoot,
+                             DatabaseId, Generation, RuntimeIdentity,
+                             ManifestPath, Timeout) ->
+    case member_call(Replacement, erlite_raft_snapshot, install,
+                     [ReplacementRoot, DatabaseId, Generation, ManifestPath]) of
+        {ok, _Index} ->
+            case member_call(Replacement, erlite_sqlite_databases, open,
+                             [ReplacementRoot, DatabaseId]) of
+                {ok, Owner} ->
+                    case erlite_sqlite_owner:verify_runtime(
+                           Owner, RuntimeIdentity) of
+                        ok -> start_and_verify_replacement(
+                                DatabaseId, ServerIds, Replacement, Owner,
+                                RuntimeIdentity, Timeout);
+                        Error -> Error
+                    end;
+                Error -> Error
+            end;
+        Error -> Error
+    end.
+
+start_and_verify_replacement(DatabaseId, ServerIds, Replacement, Owner,
+                             RuntimeIdentity, Timeout) ->
+    ClusterName = cluster_name(DatabaseId),
+    Machine = {module, erlite_raft_machine,
+               #{runtime_identity => RuntimeIdentity}},
+    Members = lists:usort([Replacement | ServerIds]),
+    case member_call(Replacement, ra, start_server,
+                     [default, ClusterName, Replacement, Machine, Members]) of
+        ok -> add_and_catch_up(ServerIds, Replacement, Owner, Timeout);
+        {error, already_started} ->
+            add_and_catch_up(ServerIds, Replacement, Owner, Timeout);
+        {error, {already_started, _Pid}} ->
+            add_and_catch_up(ServerIds, Replacement, Owner, Timeout);
+        Error -> Error
+    end.
+
+add_and_catch_up(ServerIds, Replacement, Owner, Timeout) ->
+    case ensure_member(ServerIds, Replacement, Timeout) of
+        ok ->
+            Replicas = #{Replacement => Owner},
+            case erlite_raft_database:readiness(
+                   ServerIds, Replicas, Replacement, Timeout) of
+                {ok, ready, _Index} -> ok_result(Owner);
+                Other -> Other
+            end;
+        Error -> Error
+    end.
+
+ok_result(Owner) -> {ok, Owner}.
+
+ensure_member(ServerIds, Replacement, Timeout) ->
+    case ra:members(ServerIds, Timeout) of
+        {ok, Members, _Leader} ->
+            case lists:member(Replacement, Members) of
+                true -> ok;
+                false ->
+                    case ra:add_member(ServerIds, Replacement, Timeout) of
+                        {ok, _Reply, _} -> ok;
+                        {error, already_member} -> ok;
+                        Other -> Other
+                    end
+            end;
+        Other -> Other
+    end.
+
+remove_source(Source, Replacement, Timeout,
+              State = #{database_id := DatabaseId,
+                        server_ids := ServerIds,
+                        replicas := Replicas,
+                        replica_roots := Roots}) ->
+    case {lists:member(Source, ServerIds), lists:member(Replacement, ServerIds)} of
+        {false, true} -> {ok, State};
+        {true, true} ->
+            Remaining = lists:delete(Source, ServerIds),
+            case ensure_source_removed(Remaining, Source, Timeout) of
+                ok -> retire_source(DatabaseId, Source, Replacement,
+                                    Remaining, Replicas, Roots, State);
+                Error -> Error
+            end;
+        _ -> {error, replacement_not_added}
+    end.
+
+ensure_source_removed(Remaining, Source, Timeout) ->
+    case ra:members(Remaining, Timeout) of
+        {ok, Members, _Leader} ->
+            case lists:member(Source, Members) of
+                false -> benign_force_delete(Source);
+                true ->
+                    case ra:leave_and_delete_server(
+                           default, Remaining, Source, Timeout) of
+                        ok -> ok;
+                        Error -> Error
+                    end
+            end;
+        Other -> Other
+    end.
+
+benign_force_delete(Source) ->
+    case member_call(Source, ra, force_delete_server, [default, Source]) of
+        ok -> ok;
+        {error, not_found} -> ok;
+        {error, noproc} -> ok;
+        Error -> Error
+    end.
+
+retire_source(DatabaseId, Source, _Replacement, Remaining, Replicas, Roots,
+              State) ->
+    SourceRoot = maps:get(Source, Roots),
+    case member_call(Source, erlite_sqlite_databases, close,
+                     [SourceRoot, DatabaseId]) of
+        ok ->
+            case member_call(Source, erlite_sqlite_databases, delete,
+                             [SourceRoot, DatabaseId]) of
+                ok ->
+                    {ok, State#{server_ids => lists:sort(Remaining),
+                                replicas => maps:remove(Source, Replicas),
+                                replica_roots => maps:remove(Source, Roots)}};
+                Error -> Error
+            end;
+        Error -> Error
+    end.
+
+replacement_root(StorageRoot, Replacement) ->
+    Digest = binary:encode_hex(
+               crypto:hash(sha256, term_to_binary(Replacement)), lowercase),
+    filename:join([StorageRoot, "replicas", "movement",
+                   binary_to_list(Digest)]).
+
+snapshot_manifest_name(DatabaseId, Generation, Index) ->
+    Digest = binary:encode_hex(crypto:hash(sha256, DatabaseId), lowercase),
+    binary_to_list(Digest) ++ "-" ++ integer_to_list(Generation) ++ "-" ++
+        integer_to_list(Index) ++ ".manifest".
+
 
 with_active(State0, Operation) ->
     case activate(State0) of
@@ -138,9 +434,22 @@ ensure_replicas(StorageRoot, DatabaseId, ServerIds) ->
 
 replica_roots(StorageRoot, ServerIds) ->
     maps:from_list(
-      [{ServerId, filename:join(
-                    [StorageRoot, "replicas", integer_to_list(N)])}
+      [{ServerId, replica_root(StorageRoot, ServerId, N)}
        || {ServerId, N} <- lists:zip(ServerIds, [1, 2, 3])]).
+
+replica_root(StorageRoot, {Name, _Node} = ServerId, Fallback) ->
+    NameString = atom_to_list(Name),
+    case re:run(NameString, "_r([123])$", [{capture, [1], list}]) of
+        {match, [Ordinal]} ->
+            filename:join([StorageRoot, "replicas", Ordinal]);
+        nomatch ->
+            case lists:suffix("_replacement", NameString) of
+                true -> replacement_root(StorageRoot, ServerId);
+                false -> filename:join(
+                           [StorageRoot, "replicas",
+                            integer_to_list(Fallback)])
+            end
+    end.
 
 ensure_and_open(_DatabaseId, [], Replicas, RuntimeIdentity, _CreatedRoots) ->
     {ok, Replicas, RuntimeIdentity};
