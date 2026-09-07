@@ -7,6 +7,10 @@
          snapshot_into/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
+-ifdef(TEST).
+-export([readonly_query_connection/3]).
+-endif.
+
 -record(state, {connection :: erlite_sqlite:connection()}).
 
 -spec start_link(file:filename_all(), binary()) -> gen_server:start_ret().
@@ -86,7 +90,10 @@ handle_call({query, Sql, Params}, _From, State = #state{connection = Connection}
     {reply, erlite_sqlite:query(Connection, Sql, Params), State};
 handle_call({readonly_query, Sql, Params}, _From,
             State = #state{connection = Connection}) ->
-    {reply, readonly_query_connection(Connection, Sql, Params), State};
+    case readonly_query_connection(Connection, Sql, Params) of
+        {ok, Result} -> {reply, Result, State};
+        {fatal, Reason} -> {stop, Reason, State}
+    end;
 handle_call({transaction, Statements}, _From, State = #state{connection = Connection}) ->
     {reply, erlite_sqlite:transaction(Connection, Statements), State};
 handle_call(last_applied_index, _From, State = #state{connection = Connection}) ->
@@ -137,8 +144,10 @@ readonly_query_connection(Connection, Sql, Params) ->
             Result = erlite_sqlite:query(Connection, Sql, Params),
             case erlite_sqlite:execute(
                    Connection, <<"PRAGMA query_only = OFF">>, []) of
-                {ok, _} -> Result;
-                {error, Reason} -> {error, {query_only_reset_failed, Reason}}
+                {ok, _} -> {ok, Result};
+                {error, Reason} ->
+                    {fatal, {query_only_reset_failed, Reason}}
             end;
-        {error, Reason} -> {error, {query_only_enable_failed, Reason}}
+        {error, Reason} ->
+            {ok, {error, {query_only_enable_failed, Reason}}}
     end.

@@ -39,6 +39,13 @@ readonly_query_is_enforced_by_sqlite_and_restored_test() ->
                    Owner, <<"SELECT value FROM guarded">>, []))
       end).
 
+readonly_query_reset_failure_is_fatal_test() ->
+    Connection = {erlite_sqlite_query_only_failure_adapter, connection},
+    ?assertEqual(
+       {fatal, {query_only_reset_failed, simulated_reset_failure}},
+       erlite_sqlite_owner:readonly_query_connection(
+         Connection, <<"SELECT 1">>, [])).
+
 concurrent_duplicate_apply_is_serialized_test() ->
     with_supervised_database(
       fun(_Root, _DatabaseId, Owner) ->
