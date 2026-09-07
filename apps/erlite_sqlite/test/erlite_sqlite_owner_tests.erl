@@ -22,6 +22,30 @@ owner_exposes_runtime_compatibility_check_test() ->
               ?assert(is_process_alive(Owner))
       end).
 
+readonly_query_is_enforced_by_sqlite_and_restored_test() ->
+    with_supervised_database(
+      fun(_Root, _DatabaseId, Owner) ->
+              {ok, _} = erlite_sqlite_owner:execute(
+                          Owner, <<"CREATE TABLE guarded (value INTEGER)">>, []),
+              ?assertMatch(
+                 {error, _},
+                 erlite_sqlite_owner:readonly_query(
+                   Owner, <<"INSERT INTO guarded(value) VALUES (1)">>, [])),
+              {ok, _} = erlite_sqlite_owner:execute(
+                          Owner, <<"INSERT INTO guarded(value) VALUES (2)">>, []),
+              ?assertMatch(
+                 {ok, #{rows := [[2]]}},
+                 erlite_sqlite_owner:readonly_query(
+                   Owner, <<"SELECT value FROM guarded">>, []))
+      end).
+
+readonly_query_reset_failure_is_fatal_test() ->
+    Connection = {erlite_sqlite_query_only_failure_adapter, connection},
+    ?assertEqual(
+       {fatal, {query_only_reset_failed, simulated_reset_failure}},
+       erlite_sqlite_owner:readonly_query_connection(
+         Connection, <<"SELECT 1">>, [])).
+
 concurrent_duplicate_apply_is_serialized_test() ->
     with_supervised_database(
       fun(_Root, _DatabaseId, Owner) ->

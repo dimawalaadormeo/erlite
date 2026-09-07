@@ -19,4 +19,4 @@ rebar3 ct
 rebar3 escriptize
 ```
 
-The generated command supports `init-cluster`, `join <seed-node>`, `leave`, and `cluster status`. Distributed Erlang naming and cookies must be configured when starting the command VM. The network API remains Phase 6 work.
+The generated command supports `init-cluster`, `join <seed-node>`, `leave`, and `cluster status`. Distributed Erlang naming and cookies must be configured when starting the command VM. Phase 6 adds an optional TLS HTTP/JSON service documented in [`docs/http-api.md`](docs/http-api.md), with Python and PHP examples under `examples/`.

@@ -24,5 +24,8 @@ init([]) ->
                   type => worker},
                 #{id => erlite_database_lifecycle,
                   start => {erlite_database_lifecycle, start_link, []},
+                  type => worker},
+                #{id => erlite_api_server,
+                  start => {erlite_api_server, start_link, []},
                   type => worker}],
     {ok, {SupFlags, Children}}.

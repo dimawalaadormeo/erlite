@@ -1,11 +1,15 @@
 -module(erlite_sqlite_owner).
 -behaviour(gen_server).
 
--export([start_link/2, close/1, execute/3, query/3, transaction/2,
+-export([start_link/2, close/1, execute/3, query/3, readonly_query/3, transaction/2,
          last_applied_index/1, transaction_status/3, apply_committed/6,
          runtime_identity/1, verify_runtime/2, validate_schema/1,
          snapshot_into/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
+
+-ifdef(TEST).
+-export([readonly_query_connection/3]).
+-endif.
 
 -record(state, {connection :: erlite_sqlite:connection()}).
 
@@ -26,6 +30,11 @@ execute(Pid, Sql, Params) ->
     {ok, erlite_sqlite_adapter:query_result()} | {error, term()}.
 query(Pid, Sql, Params) ->
     gen_server:call(Pid, {query, Sql, Params}, infinity).
+
+-spec readonly_query(pid(), binary(), erlite_sqlite_adapter:params()) ->
+    {ok, erlite_sqlite_adapter:query_result()} | {error, term()}.
+readonly_query(Pid, Sql, Params) ->
+    gen_server:call(Pid, {readonly_query, Sql, Params}, infinity).
 
 -spec transaction(pid(), [erlite_sqlite_adapter:statement()]) ->
     {ok, [erlite_sqlite_adapter:statement_result()]} | {error, term()}.
@@ -79,6 +88,12 @@ handle_call({execute, Sql, Params}, _From, State = #state{connection = Connectio
     {reply, erlite_sqlite:execute(Connection, Sql, Params), State};
 handle_call({query, Sql, Params}, _From, State = #state{connection = Connection}) ->
     {reply, erlite_sqlite:query(Connection, Sql, Params), State};
+handle_call({readonly_query, Sql, Params}, _From,
+            State = #state{connection = Connection}) ->
+    case readonly_query_connection(Connection, Sql, Params) of
+        {ok, Result} -> {reply, Result, State};
+        {fatal, Reason} -> {stop, Reason, State}
+    end;
 handle_call({transaction, Statements}, _From, State = #state{connection = Connection}) ->
     {reply, erlite_sqlite:transaction(Connection, Statements), State};
 handle_call(last_applied_index, _From, State = #state{connection = Connection}) ->
@@ -122,3 +137,17 @@ handle_info(_Info, State) ->
 terminate(_Reason, #state{connection = Connection}) ->
     _ = erlite_sqlite:close(Connection),
     ok.
+
+readonly_query_connection(Connection, Sql, Params) ->
+    case erlite_sqlite:execute(Connection, <<"PRAGMA query_only = ON">>, []) of
+        {ok, _} ->
+            Result = erlite_sqlite:query(Connection, Sql, Params),
+            case erlite_sqlite:execute(
+                   Connection, <<"PRAGMA query_only = OFF">>, []) of
+                {ok, _} -> {ok, Result};
+                {error, Reason} ->
+                    {fatal, {query_only_reset_failed, Reason}}
+            end;
+        {error, Reason} ->
+            {ok, {error, {query_only_enable_failed, Reason}}}
+    end.
