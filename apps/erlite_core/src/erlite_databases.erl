@@ -3,7 +3,7 @@
 
 -export([start_link/0, create/2, ensure/2, delete/1, delete_recorded/2,
          list/0, status/1,
-         write/3, query/4, cool/1]).
+         write/3, query/4, cool/1, add_replacement/5, remove_source/4]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
 -define(ROUTES, erlite_database_routes).
@@ -27,6 +27,14 @@ write(DatabaseId, Command, Timeout) ->
 query(DatabaseId, Sql, Params, Timeout) ->
     call_database(DatabaseId, {query, Sql, Params, Timeout}).
 cool(DatabaseId) -> call_database(DatabaseId, cool).
+add_replacement(DatabaseId, Source, Replacement, Generation, Timeout) ->
+    gen_server:call(?MODULE,
+                    {add_replacement, DatabaseId, Source, Replacement,
+                     Generation, Timeout}, infinity).
+remove_source(DatabaseId, Source, Replacement, Timeout) ->
+    gen_server:call(?MODULE,
+                    {remove_source, DatabaseId, Source, Replacement, Timeout},
+                    infinity).
 
 call_database(DatabaseId, Request) ->
     case lookup_route(DatabaseId) of
@@ -76,6 +84,15 @@ handle_call({delete_recorded, DatabaseId, Options}, _From, State) ->
         error ->
             {reply, erlite_database:delete_resources(DatabaseId, Options), State}
     end;
+handle_call({add_replacement, DatabaseId, Source, Replacement, Generation,
+             Timeout}, _From, State) ->
+    movement_call(DatabaseId,
+                  {add_replacement, Source, Replacement, Generation, Timeout},
+                  State);
+handle_call({remove_source, DatabaseId, Source, Replacement, Timeout},
+            _From, State) ->
+    movement_call(DatabaseId,
+                  {remove_source, Source, Replacement, Timeout}, State);
 handle_call(_Request, _From, State) ->
     {reply, {error, unsupported_request}, State}.
 
@@ -135,6 +152,23 @@ database_call(Pid, Request, Timeout) ->
     try gen_server:call(Pid, Request, Timeout)
     catch
         exit:Reason -> {error, {database_unavailable, Reason}}
+    end.
+
+movement_call(DatabaseId, Request, State) ->
+    case maps:find(DatabaseId, State) of
+        {ok, Entry = #{pid := Pid}} ->
+            case database_call(Pid, Request) of
+                ok ->
+                    case database_call(Pid, registry_metadata, 5000) of
+                        {ok, #{server_ids := ServerIds}} ->
+                            {reply, ok,
+                             State#{DatabaseId => Entry#{server_ids =>
+                                                             ServerIds}}};
+                        Error -> {reply, Error, State}
+                    end;
+                Error -> {reply, Error, State}
+            end;
+        error -> {reply, {error, database_not_found}, State}
     end.
 
 remove_route(Pid) ->

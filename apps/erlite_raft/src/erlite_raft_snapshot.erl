@@ -1,6 +1,7 @@
 -module(erlite_raft_snapshot).
 
--export([create/7, verify/4, install/4]).
+-export([create/7, verify/4, install/4, transfer/3, export_bundle/1,
+         receive_bundle/3]).
 
 -define(FORMAT_VERSION, 2).
 
@@ -115,6 +116,113 @@ install(StorageRoot, DatabaseId, Generation, ManifestPath) ->
                 {error, _Reason} = Error -> Error
             end;
         Error -> Error
+    end.
+
+-spec transfer({atom(), node()}, {atom(), node()}, file:filename_all()) ->
+    {ok, file:filename_all()} | {error, term()}.
+transfer(Source, Target, ManifestPath) ->
+    case member_call(Source, ?MODULE, export_bundle, [ManifestPath]) of
+        {ok, Manifest, ImageName, ImageBinary} ->
+            member_call(Target, ?MODULE, receive_bundle,
+                        [Manifest, ImageName, ImageBinary]);
+        Error -> Error
+    end.
+
+-spec export_bundle(file:filename_all()) ->
+    {ok, map(), file:filename(), binary()} | {error, term()}.
+export_bundle(ManifestPath) ->
+    case read_manifest(ManifestPath) of
+        {ok, Manifest = #{image := ImageName}}
+          when is_list(ImageName), ImageName =/= [] ->
+            case filename:basename(ImageName) =:= ImageName of
+                true ->
+                    ImagePath = filename:join(filename:dirname(ManifestPath),
+                                              ImageName),
+                    case {file:read_file(ManifestPath), file:read_file(ImagePath)} of
+                        {{ok, _ManifestBinary}, {ok, ImageBinary}} ->
+                            {ok, Manifest, ImageName, ImageBinary};
+                        {{error, Reason}, _} ->
+                            {error, {snapshot_read_failed, Reason}};
+                        {_, {error, Reason}} ->
+                            {error, {snapshot_read_failed, Reason}}
+                    end;
+                false -> {error, incompatible_snapshot}
+            end;
+        {ok, _} -> {error, incompatible_snapshot};
+        Error -> Error
+    end.
+
+-spec receive_bundle(map(), file:filename(), binary()) ->
+    {ok, file:filename_all()} | {error, term()}.
+receive_bundle(Manifest = #{image := ImageName, sha256 := Digest}, ImageName,
+               ImageBinary)
+  when is_map(Manifest), is_binary(Digest), is_list(ImageName), ImageName =/= [],
+       is_binary(ImageBinary) ->
+    ManifestBinary = term_to_binary(Manifest, [compressed]),
+    receive_verified_bundle(ManifestBinary, ImageName, ImageBinary, Digest);
+receive_bundle(_, _, _) -> {error, incompatible_snapshot}.
+
+receive_verified_bundle(ManifestBinary, ImageName, ImageBinary, Digest) ->
+    case filename:basename(ImageName) =:= ImageName andalso
+         crypto:hash(sha256, ImageBinary) =:= Digest of
+        true ->
+            SnapshotRoot = application:get_env(
+                             erlite_raft, incoming_snapshot_root,
+                             filename:join("/tmp", "erlite-incoming-snapshots")),
+            ImagePath = filename:join(SnapshotRoot, ImageName),
+            ManifestPath = filename:rootname(ImagePath, ".sqlite") ++ ".manifest",
+            case filelib:ensure_dir(ImagePath) of
+                ok ->
+                    case durable_replace(ImagePath, ImageBinary) of
+                        ok ->
+                            case durable_replace(ManifestPath, ManifestBinary) of
+                                ok ->
+                                    case sync_directory(SnapshotRoot) of
+                                        ok -> {ok, ManifestPath};
+                                        {error, Reason} ->
+                                            {error, {snapshot_directory_sync_failed,
+                                                     Reason}}
+                                    end;
+                                Error -> Error
+                            end;
+                        Error -> Error
+                    end;
+                {error, Reason} -> {error, {snapshot_directory, Reason}}
+            end;
+        false -> {error, snapshot_checksum_mismatch}
+    end.
+
+durable_replace(Path, Binary) ->
+    Temporary = Path ++ ".receive-" ++
+                integer_to_list(erlang:unique_integer([positive])),
+    case file:open(Temporary, [write, binary, exclusive]) of
+        {ok, File} ->
+            Result = case file:write(File, Binary) of
+                         ok -> file:sync(File);
+                         Error -> Error
+                     end,
+            _ = file:close(File),
+            case Result of
+                ok ->
+                    case file:rename(Temporary, Path) of
+                        ok -> file:change_mode(Path, 8#600);
+                        {error, Reason} ->
+                            _ = file:delete(Temporary),
+                            {error, {snapshot_receive_activate_failed, Reason}}
+                    end;
+                {error, Reason} ->
+                    _ = file:delete(Temporary),
+                    {error, {snapshot_receive_write_failed, Reason}}
+            end;
+        {error, Reason} -> {error, {snapshot_receive_open_failed, Reason}}
+    end.
+
+member_call({_, Node}, Module, Function, Arguments) when Node =:= node() ->
+    erlang:apply(Module, Function, Arguments);
+member_call({_, Node}, Module, Function, Arguments) ->
+    case rpc:call(Node, Module, Function, Arguments) of
+        {badrpc, Reason} -> {error, {snapshot_rpc_failed, Node, Reason}};
+        Result -> Result
     end.
 
 install_verified(Image, Destination, Index) ->

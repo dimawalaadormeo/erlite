@@ -2,10 +2,12 @@
 
 -export([all/0, init_per_suite/1, end_per_suite/1,
          three_member_catalog_status/1, join_and_leave_catalog_member/1,
-         database_lifecycle_is_durable_and_fenced/1]).
+         database_lifecycle_is_durable_and_fenced/1,
+         database_movement_is_durable_and_fenced/1]).
 
 all() -> [three_member_catalog_status, join_and_leave_catalog_member,
-          database_lifecycle_is_durable_and_fenced].
+          database_lifecycle_is_durable_and_fenced,
+          database_movement_is_durable_and_fenced].
 
 init_per_suite(Config) ->
     Root = filename:join("/tmp", "erlite-catalog-" ++
@@ -103,6 +105,38 @@ database_lifecycle_is_durable_and_fenced(_Config) ->
            ServerRef, DatabaseId, DeleteOp, 1, 10000),
     {ok, #{state := tombstoned}} =
         erlite_catalog:database(ServerRef, DatabaseId, 10000, consistent),
+    ok.
+
+database_movement_is_durable_and_fenced(_Config) ->
+    [ServerRef | _] = server_ids(),
+    DatabaseId = <<"catalog-moving-database">>,
+    CreateOp = <<20:128>>,
+    MoveOp = <<21:128>>,
+    Replicas = [{erlite_moving_db_1, node()},
+                {erlite_moving_db_2, node()},
+                {erlite_moving_db_3, node()}],
+    Source = hd(Replicas),
+    Replacement = {erlite_moving_db_4, node()},
+    ok = erlite_catalog:prepare_database_create(
+           ServerRef, DatabaseId, CreateOp, 1, Replicas, 10000),
+    ok = erlite_catalog:mark_database_ready(
+           ServerRef, DatabaseId, CreateOp, 1, 10000),
+    ok = erlite_catalog:prepare_database_move(
+           ServerRef, DatabaseId, MoveOp, 1, Source, Replacement, 10000),
+    {ok, [#{database_id := DatabaseId, movement := #{phase := adding}}]} =
+        erlite_catalog:recoverable_databases(ServerRef, 10000, consistent),
+    ok = erlite_catalog:mark_database_replacement_ready(
+           ServerRef, DatabaseId, MoveOp, 1, 10000),
+    ok = erlite_catalog:finish_database_move(
+           ServerRef, DatabaseId, MoveOp, 1, 10000),
+    ok = erlite_catalog:finish_database_move(
+           ServerRef, DatabaseId, MoveOp, 1, 10000),
+    {ok, Final = #{generation := 2, state := ready}} =
+        erlite_catalog:database(ServerRef, DatabaseId, 10000, consistent),
+    false = lists:member(Source, maps:get(replicas, Final)),
+    true = lists:member(Replacement, maps:get(replicas, Final)),
+    {ok, []} = erlite_catalog:recoverable_databases(
+                 ServerRef, 10000, consistent),
     ok.
 
 catalog_nodes() ->

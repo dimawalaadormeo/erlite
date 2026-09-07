@@ -1,9 +1,8 @@
 # Erlite User Guide
 
-This guide covers the functionality implemented through Phase 6. Erlite is
+This guide covers the functionality implemented through Phase 7. Erlite is
 currently a development-stage Erlang/OTP runtime for operating many isolated,
-Raft-replicated SQLite databases. Phase 7 node expansion and database movement
-have not yet been implemented.
+Raft-replicated SQLite databases.
 
 ## Requirements
 
@@ -88,9 +87,35 @@ three distinct nodes are active. To remove the local node:
 _build/default/bin/erlite leave
 ```
 
-Do not use node removal as a substitute for Phase 7 replica movement. Before
-Phase 7, operators must ensure that removing a node cannot strand database
+Move every database replica away from a node before removing that node. Node
+removal changes catalog membership; it does not implicitly relocate database
 replicas.
+
+## Move a database replica
+
+Phase 7 exposes explicit movement through the Erlang control API. Choose a
+source from the database's current replica set and an active catalog node that
+does not already host that database:
+
+```erlang
+{ok, #{replicas := [Source | _]}} =
+    erlite_catalog:database(CatalogServer, <<"merchant-100">>, 15000,
+                            consistent),
+ok = erlite_database_lifecycle:move(<<"merchant-100">>, Source,
+                                    'erlite4@db4.example.net').
+```
+
+The call returns only after the replacement has been snapshotted, added to the
+Ra group, caught up and verified, and the source has been safely removed. It is
+safe to retry after an interruption: the catalog records and reconciles the
+incomplete operation. Only one replica movement may be active for a database.
+The target must be active and unused by that database, and consistent writes
+continue to require Ra quorum throughout the move.
+
+There is not yet a CLI or HTTPS endpoint for this operation. Operators should
+inspect `erlite_catalog:database/4` after completion and confirm the new
+generation and RF=3 replica set before issuing `erlite leave` on a drained
+node.
 
 ## Enable the HTTPS API
 
@@ -241,8 +266,9 @@ certificates and should be configured with the deployment's trusted CA.
 
 ## Current project boundary
 
-Phases 0 through 6 are complete. Development is paused before Phase 7. The
-current implementation does not yet provide automated node expansion, durable
-database movement, automatic replica repair, rebalancing, backup/restore, or
-fleet migrations. See `ERLITE_PROJECT.md` for the roadmap and
+Phases 0 through 7 are complete. Explicit database movement is available to
+move one recorded source replica to an active target node; automatic repair and
+rebalancing remain later phases. The current implementation does not yet provide
+automatic replica repair, rebalancing, backup/restore, or fleet migrations. See
+`ERLITE_PROJECT.md` for the roadmap and
 `docs/correctness.md` for implemented guarantees.

@@ -76,6 +76,16 @@ apply(_Meta, {prepare_database_delete, DatabaseId, OperationId, Generation},
 apply(_Meta, {tombstone_database, DatabaseId, OperationId, Generation}, State) ->
     transition_database(DatabaseId, OperationId, Generation, deleting,
                         tombstoned, State);
+apply(_Meta, {prepare_database_move, DatabaseId, OperationId, Generation,
+              Source, Replacement}, State) ->
+    prepare_database_move(DatabaseId, OperationId, Generation, Source,
+                          Replacement, State);
+apply(_Meta, {mark_database_replacement_ready, DatabaseId, OperationId,
+              Generation}, State) ->
+    transition_database_move(DatabaseId, OperationId, Generation,
+                             adding, removing, State);
+apply(_Meta, {finish_database_move, DatabaseId, OperationId, Generation}, State) ->
+    finish_database_move(DatabaseId, OperationId, Generation, State);
 apply(_Meta, Command, State) ->
     {State, {error, {unsupported_catalog_command, Command}}}.
 
@@ -152,6 +162,9 @@ prepare_database_delete(DatabaseId, OperationId, Generation,
         true ->
             case maps:get(DatabaseId, Databases, undefined) of
                 undefined -> {State, {error, database_not_found}};
+                #{generation := Generation, state := ready,
+                  movement := #{operation_id := MoveOperation}} ->
+                    {State, {error, {movement_in_progress, MoveOperation}}};
                 Existing = #{generation := Generation, state := ready} ->
                     put_database(Existing#{state => deleting,
                                            operation_id => OperationId}, State);
@@ -183,6 +196,116 @@ new_database(DatabaseId, OperationId, Generation, Replicas) ->
       operation_id => OperationId, generation => Generation,
       replicas => lists:sort(Replicas), replication_factor => 3,
       schema_version => 0}.
+
+prepare_database_move(DatabaseId, OperationId, Generation, Source, Replacement,
+                      State) ->
+    Databases = maps:get(databases, State, #{}),
+    case valid_identity(DatabaseId, OperationId, Generation) andalso
+         valid_server_id(Source) andalso valid_server_id(Replacement) andalso
+         Source =/= Replacement of
+        false -> {State, {error, invalid_database_move}};
+        true ->
+            case maps:get(DatabaseId, Databases, undefined) of
+                Existing = #{state := ready, generation := Generation,
+                             replicas := Replicas} ->
+                    prepare_database_move_for_record(
+                      Existing, OperationId, Source, Replacement, Replicas,
+                      Databases, maps:get(nodes, State), State);
+                undefined -> {State, {error, database_not_found}};
+                Existing -> {State, fence_error(Existing, Generation)}
+            end
+    end.
+
+prepare_database_move_for_record(
+  #{movement := #{operation_id := OperationId, source := Source,
+                  replacement := Replacement}},
+  OperationId, Source, Replacement, _Replicas, _Databases, _Nodes, State) ->
+    {State, ok};
+prepare_database_move_for_record(#{movement := #{operation_id := Current}},
+                                 _OperationId, _Source, _Replacement, _Replicas,
+                                 _Databases, _Nodes, State) ->
+    {State, {error, {movement_in_progress, Current}}};
+prepare_database_move_for_record(Existing, OperationId, Source, Replacement,
+                                 Replicas, Databases, Nodes, State) ->
+    case lists:member(Source, Replicas) of
+        false -> {State, {error, source_not_in_placement}};
+        true ->
+            case lists:member(Replacement, Replicas) of
+                true -> {State, {error, replacement_already_in_placement}};
+                false ->
+                    case replacement_available(Replacement, Databases, Nodes) of
+                        true ->
+                            Movement = #{operation_id => OperationId,
+                                         source => Source,
+                                         replacement => Replacement,
+                                         phase => adding},
+                            put_database(Existing#{movement => Movement}, State);
+                        false -> {State, {error, replacement_unavailable}}
+                    end
+            end
+    end.
+
+transition_database_move(DatabaseId, OperationId, Generation, From, To, State) ->
+    Databases = maps:get(databases, State, #{}),
+    case maps:get(DatabaseId, Databases, undefined) of
+        Existing = #{state := ready, generation := Generation,
+                     movement := Movement = #{operation_id := OperationId,
+                                               phase := From}} ->
+            put_database(Existing#{movement => Movement#{phase => To}}, State);
+        #{state := ready, generation := Generation,
+          movement := #{operation_id := OperationId, phase := To}} ->
+            {State, ok};
+        undefined -> {State, {error, database_not_found}};
+        Existing -> {State, move_fence_error(Existing, OperationId, Generation)}
+    end.
+
+finish_database_move(DatabaseId, OperationId, Generation, State) ->
+    Databases = maps:get(databases, State, #{}),
+    case maps:get(DatabaseId, Databases, undefined) of
+        Existing = #{state := ready, generation := Generation,
+                     replicas := Replicas,
+                     movement := #{operation_id := OperationId,
+                                   source := Source, replacement := Replacement,
+                                   phase := removing}} ->
+            NewReplicas = lists:sort([Replacement | lists:delete(Source, Replicas)]),
+            Completed = #{operation_id => OperationId, source => Source,
+                          replacement => Replacement,
+                          from_generation => Generation},
+            put_database(maps:remove(
+                           movement,
+                           Existing#{replicas => NewReplicas,
+                                     generation => Generation + 1,
+                                     last_movement => Completed}), State);
+        #{state := ready, generation := CompletedGeneration,
+          last_movement := #{operation_id := OperationId,
+                             from_generation := Generation}}
+          when CompletedGeneration =:= Generation + 1 -> {State, ok};
+        undefined -> {State, {error, database_not_found}};
+        Existing -> {State, move_fence_error(Existing, OperationId, Generation)}
+    end.
+
+move_fence_error(#{generation := Current}, _OperationId, Supplied)
+  when Supplied =/= Current -> {error, {stale_generation, Supplied, Current}};
+move_fence_error(#{movement := #{operation_id := Current}}, OperationId, _)
+  when OperationId =/= Current -> {error, {operation_id_conflict, Current}};
+move_fence_error(#{movement := #{phase := Phase}}, _OperationId, _) ->
+    {error, {invalid_movement_transition, Phase}};
+move_fence_error(_Existing, _OperationId, _) -> {error, no_movement_in_progress}.
+
+replacement_available({_Name, ErlangNode} = Replacement, Databases, Nodes) ->
+    ActiveNodes = [element(2, maps:get(server_id, NodeRecord))
+                   || NodeRecord <- maps:values(Nodes),
+                      maps:get(state, NodeRecord, active) =:= active],
+    Used = lists:append(
+             [maps:get(replicas, Database) ++ movement_replacements(Database)
+              || Database <- maps:values(Databases),
+                 maps:get(state, Database) =/= tombstoned]),
+    lists:member(ErlangNode, ActiveNodes) andalso
+        not lists:member(Replacement, Used).
+
+movement_replacements(#{movement := #{replacement := Replacement}}) ->
+    [Replacement];
+movement_replacements(_) -> [].
 
 put_database(Database = #{database_id := DatabaseId},
              State) ->
@@ -217,7 +340,8 @@ placement_available(DatabaseId, Replicas, Databases, Nodes) ->
                                     lists:member(ErlangNode, ActiveNodes)
                             end, Replicas),
     UsedByOthers = lists:append(
-                     [maps:get(replicas, Database)
+                     [maps:get(replicas, Database) ++
+                          movement_replacements(Database)
                       || Database <- maps:values(Databases),
                          maps:get(database_id, Database) =/= DatabaseId,
                          maps:get(state, Database) =/= tombstoned]),
@@ -249,4 +373,5 @@ recoverable(State) ->
     Databases = maps:get(databases, State, #{}),
     lists:sort([Database || Database <- maps:values(Databases),
                             lists:member(maps:get(state, Database),
-                                         [creating, deleting])]).
+                                         [creating, deleting]) orelse
+                            maps:is_key(movement, Database)]).

@@ -93,6 +93,9 @@ status_and_configure(Root, ServerId, Timeout) ->
         {ok, _} = Result ->
             ok = application:set_env(erlite_core, catalog_server, ServerId),
             ok = application:set_env(erlite_core, storage_root, Root),
+            ok = application:set_env(
+                   erlite_raft, incoming_snapshot_root,
+                   filename:join([Root, "snapshots", "incoming"])),
             case whereis(erlite_database_lifecycle) of
                 Pid when is_pid(Pid) ->
                     case erlite_database_lifecycle:configure(ServerId, Root) of

@@ -116,6 +116,12 @@ Database routing is authorized by a consistent read of the catalog on every reso
 
 Leader discovery begins from the replica set returned by that consistent lookup. A reported leader is accepted only if it appears in both Ra's current membership response and the catalog replica set. Cached updates carry the catalog-configuration epoch and record generation; delayed updates from a previous configuration are discarded, and an older generation cannot replace a newer cached generation.
 
+## Durable database movement
+
+Phase 7 movement starts by durably recording a single operation-ID-fenced source and replacement on an otherwise ready database. The authoritative RF=3 replica set is not changed during the `adding` phase. A quorum barrier first fixes the source SQLite applied index. A snapshot binds that index, Ra term, database ID, placement generation, schema version, checksum, and SQLite runtime identity; its image and manifest are synced on the target and verified before installation. The replacement Ra server is then added and must catch up both Ra state and SQLite through a fresh quorum barrier before the catalog can transition to `removing`.
+
+Source removal is allowed only from `removing`. An ambiguous add or remove result is reconciled against Ra's committed membership before retry. The old SQLite replica is deleted only after Ra reports the source absent. Placement substitution and generation advancement occur only afterward. Every catalog transition is idempotent, incomplete movement is returned for reconciliation, and a target must be an active catalog node whose Ra server ID is unused. Delete is fenced while a move is incomplete. Controller reconstruction accepts only the old RF=3 set, the temporary four-member set, or the final RF=3 replacement set and derives stable storage roots for both original and replacement replicas. Consequently a crash cannot make an unverified replacement authoritative, silently overlap two movements, race physical deletion, or resurrect a removed source as a blank replica.
+
 ## External service boundary
 
 Phase 6 never exposes a plaintext listener. Enabling the HTTP service requires TLS certificate material and at least one configured bearer credential. Tokens are compared in constant time and removed from the authenticated identity before dispatch. Admin authorization is required for create, delete, and fleet listing; service identities can access only their explicit database allow-list.
