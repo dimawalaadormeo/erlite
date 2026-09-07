@@ -13,5 +13,10 @@ init([]) ->
     SupFlags = #{strategy => one_for_one,
                  intensity => 1,
                  period => 5},
-    {ok, {SupFlags, []}}.
-
+    Children = [#{id => erlite_database_sup,
+                  start => {erlite_database_sup, start_link, []},
+                  type => supervisor},
+                #{id => erlite_databases,
+                  start => {erlite_databases, start_link, []},
+                  type => worker}],
+    {ok, {SupFlags, Children}}.

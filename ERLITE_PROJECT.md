@@ -804,6 +804,8 @@ Exit criteria include a real three-node test covering follower loss, leader loss
 
 ### Phase 4 — Multiple databases
 
+**Status: complete**
+
 Build:
 
 - dynamic database supervisors

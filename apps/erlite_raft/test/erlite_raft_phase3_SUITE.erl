@@ -112,9 +112,8 @@ single_database_high_availability(Config) ->
     {ok, DelayedIndex, _Manifests} = erlite_raft_database:checkpoint(
                                        Members, Replicas, SnapshotRoots,
                                        DatabaseId, 1, 0, 15000),
-    {error, {snapshot_required, _}} =
-        erlite_raft_cluster:committed_entries_after(
-          hd(Members), 0, 15000),
+    {error, {snapshot_required, _}} = await_snapshot_required(
+                                        hd(Members), 0, 15000),
     {ok, _} = erlite_raft_database:write(
                 Members, command(<<"tx-1">>, 1, <<"one">>), Replicas, 15000),
     {error, {transaction_id_conflict, <<"tx-1">>}} =
@@ -172,6 +171,23 @@ stop_server({_, Node} = ServerId) ->
 
 restart_server({_, Node} = ServerId) ->
     rpc:call(Node, ra, restart_server, [default, ServerId]).
+
+await_snapshot_required(ServerId, Index, Timeout) ->
+    Deadline = erlang:monotonic_time(millisecond) + Timeout,
+    await_snapshot_required(ServerId, Index, Deadline, undefined).
+
+await_snapshot_required(ServerId, Index, Deadline, _LastResult) ->
+    Result = erlite_raft_cluster:committed_entries_after(ServerId, Index, 1000),
+    case Result of
+        {error, {snapshot_required, _}} -> Result;
+        _ ->
+            case erlang:monotonic_time(millisecond) >= Deadline of
+                true -> Result;
+                false ->
+                    timer:sleep(25),
+                    await_snapshot_required(ServerId, Index, Deadline, Result)
+            end
+    end.
 
 is_success({ok, _}) -> true;
 is_success({ok, _, _}) -> true;
