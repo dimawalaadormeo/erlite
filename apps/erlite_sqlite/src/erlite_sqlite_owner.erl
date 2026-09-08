@@ -2,7 +2,9 @@
 -behaviour(gen_server).
 
 -export([start_link/2, close/1, execute/3, query/3, readonly_query/3, transaction/2,
-         last_applied_index/1, transaction_status/3, apply_committed/6,
+         last_applied_index/1, schema_version/1, migration_history/1,
+         transaction_status/3, apply_committed/6, apply_committed/7,
+         apply_migration/9,
          runtime_identity/1, verify_runtime/2, validate_schema/1,
          snapshot_into/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
@@ -45,6 +47,9 @@ transaction(Pid, Statements) ->
 last_applied_index(Pid) ->
     gen_server:call(Pid, last_applied_index, infinity).
 
+schema_version(Pid) -> gen_server:call(Pid, schema_version, infinity).
+migration_history(Pid) -> gen_server:call(Pid, migration_history, infinity).
+
 -spec transaction_status(pid(), binary(), binary()) ->
     new | duplicate | conflict | {error, term()}.
 transaction_status(Pid, TransactionId, CommandHash) ->
@@ -52,13 +57,26 @@ transaction_status(Pid, TransactionId, CommandHash) ->
                     infinity).
 
 -spec apply_committed(pid(), non_neg_integer(), pos_integer(), binary(), binary(),
+                      non_neg_integer(),
                       [erlite_sqlite_adapter:statement()]) ->
     {ok, applied | already_applied | transaction_id_conflict} | {error, term()}.
 apply_committed(Pid, ExpectedIndex, RaftIndex, TransactionId, CommandHash,
                 Statements) ->
+    gen_server:call(Pid, {apply_committed_legacy, ExpectedIndex, RaftIndex,
+                          TransactionId, CommandHash, Statements}, infinity).
+
+apply_committed(Pid, ExpectedIndex, RaftIndex, TransactionId, CommandHash,
+                SchemaVersion,
+                Statements) ->
     gen_server:call(
       Pid, {apply_committed, ExpectedIndex, RaftIndex, TransactionId,
-            CommandHash, Statements}, infinity).
+            CommandHash, SchemaVersion, Statements}, infinity).
+
+apply_migration(Pid, ExpectedIndex, RaftIndex, Set, MigrationId, CommandHash,
+                FromVersion, ToVersion, Statements) ->
+    gen_server:call(Pid, {apply_migration, ExpectedIndex, RaftIndex, Set,
+                          MigrationId, CommandHash, FromVersion, ToVersion,
+                          Statements}, infinity).
 
 -spec runtime_identity(pid()) ->
     {ok, erlite_sqlite_compatibility:runtime_identity()} | {error, term()}.
@@ -98,16 +116,34 @@ handle_call({transaction, Statements}, _From, State = #state{connection = Connec
     {reply, erlite_sqlite:transaction(Connection, Statements), State};
 handle_call(last_applied_index, _From, State = #state{connection = Connection}) ->
     {reply, erlite_sqlite_schema:last_applied_index(Connection), State};
+handle_call(schema_version, _From, State = #state{connection = Connection}) ->
+    {reply, erlite_sqlite_schema:schema_version(Connection), State};
+handle_call(migration_history, _From, State = #state{connection = Connection}) ->
+    {reply, erlite_sqlite_schema:migration_history(Connection), State};
 handle_call({transaction_status, TransactionId, CommandHash}, _From,
             State = #state{connection = Connection}) ->
     {reply, erlite_sqlite_schema:transaction_status(
               Connection, TransactionId, CommandHash), State};
 handle_call({apply_committed, ExpectedIndex, RaftIndex, TransactionId,
+             CommandHash, SchemaVersion, Statements}, _From,
+            State = #state{connection = Connection}) ->
+    Reply = erlite_sqlite_schema:apply_committed(
+              Connection, ExpectedIndex, RaftIndex, TransactionId,
+              CommandHash, SchemaVersion, Statements),
+    {reply, Reply, State};
+handle_call({apply_committed_legacy, ExpectedIndex, RaftIndex, TransactionId,
              CommandHash, Statements}, _From,
             State = #state{connection = Connection}) ->
     Reply = erlite_sqlite_schema:apply_committed(
               Connection, ExpectedIndex, RaftIndex, TransactionId,
               CommandHash, Statements),
+    {reply, Reply, State};
+handle_call({apply_migration, ExpectedIndex, RaftIndex, Set, MigrationId,
+             CommandHash, FromVersion, ToVersion, Statements}, _From,
+            State = #state{connection = Connection}) ->
+    Reply = erlite_sqlite_schema:apply_migration(
+              Connection, ExpectedIndex, RaftIndex, Set, MigrationId,
+              CommandHash, FromVersion, ToVersion, Statements),
     {reply, Reply, State};
 handle_call(runtime_identity, _From, State = #state{connection = Connection}) ->
     {reply, erlite_sqlite_compatibility:runtime_identity(Connection), State};

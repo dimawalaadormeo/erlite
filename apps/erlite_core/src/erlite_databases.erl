@@ -3,7 +3,7 @@
 
 -export([start_link/0, create/2, ensure/2, delete/1, delete_recorded/2,
          list/0, status/1, placement/1,
-         write/3, query/4, cool/1, backup/3,
+         write/3, migrate/3, migration_history/1, query/4, cool/1, backup/3,
          add_replacement/5, remove_source/4]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
@@ -26,6 +26,9 @@ status(DatabaseId) -> call_database(DatabaseId, status).
 placement(DatabaseId) -> call_database(DatabaseId, registry_metadata).
 write(DatabaseId, Command, Timeout) ->
     call_database(DatabaseId, {write, Command, Timeout}).
+migrate(DatabaseId, Command, Timeout) ->
+    call_database(DatabaseId, {migrate, Command, Timeout}).
+migration_history(DatabaseId) -> call_database(DatabaseId, migration_history).
 query(DatabaseId, Sql, Params, Timeout) ->
     call_database(DatabaseId, {query, Sql, Params, Timeout}).
 cool(DatabaseId) -> call_database(DatabaseId, cool).

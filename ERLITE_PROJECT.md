@@ -874,14 +874,15 @@ Build:
 
 Provide PHP and Python examples.
 
-**Development checkpoint (2026-09-08):** Phase 10 is complete. Backups bind a
+**Development checkpoint (2026-09-08):** Phase 11 is complete. Backups bind a
 verified SQLite image to database identity, placement generation, applied Raft
 index and term, schema/runtime versions, creation time, and checksum. Replace
 restore and clone use durable `restoring` catalog fencing and always start a new
 Raft history after atomically resetting the imported image's internal Raft
-ledger. Portable export and corruption rejection are covered. Final
-verification completed 88 EUnit tests and 18 Common Test cases. Resume with
-Phase 11 fleet migrations.
+ledger. Portable export and corruption rejection are covered. Phase 11 fleet
+migrations add replicated per-database history, durable catalog
+campaigns, canary and bounded batch execution, pause/resume, retries, and
+per-database reporting. Resume with Phase 12 placement improvements.
 
 ### Phase 7 — Node expansion and database movement
 
@@ -988,6 +989,8 @@ The accepted protocol is recorded in ADR 0004.
 
 ### Phase 11 — Fleet migrations
 
+**Status: complete**
+
 Build:
 
 - per-database migration history
@@ -996,6 +999,14 @@ Build:
 - batching
 - pause/resume
 - retry/reporting
+
+Migrations are distinct versioned Raft commands and use a conservative DDL
+policy. Each replica atomically applies the DDL, records the migration set and
+ID, advances the schema version, and advances its durable Raft index. The
+replicated catalog stores campaigns, pause state, retry counts, and outcomes.
+A deterministic canary cohort finishes before bounded fleet batches begin; a
+canary failure pauses the campaign. Application, module, and explicitly scoped
+database packs share this ordered representation. See ADR 0005.
 
 ### Phase 12 — Placement improvements
 

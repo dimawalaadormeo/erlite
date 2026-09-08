@@ -26,6 +26,12 @@ write(ServerRef, Command, Replicas, Timeout) ->
     end.
 
 write_status(Owner, Command, CommittedIndex) ->
+    case erlite_raft_command:type(Command) of
+        migration -> migration_status(Owner, Command, CommittedIndex);
+        transaction -> transaction_status(Owner, Command, CommittedIndex)
+    end.
+
+transaction_status(Owner, Command, CommittedIndex) ->
     TransactionId = erlite_raft_command:transaction_id(Command),
     CommandHash = erlite_raft_command:hash(Command),
     case erlite_sqlite_owner:transaction_status(
@@ -34,6 +40,15 @@ write_status(Owner, Command, CommittedIndex) ->
         conflict -> {error, {transaction_id_conflict, TransactionId}};
         new -> {error, {transaction_not_applied, TransactionId}};
         {error, _Reason} = Error -> Error
+    end.
+
+migration_status(Owner, Command, CommittedIndex) ->
+    Target = erlite_raft_command:target_schema_version(Command),
+    case erlite_sqlite_owner:schema_version(Owner) of
+        {ok, Version} when Version >= Target ->
+            {ok, CommittedIndex};
+        {ok, Version} -> {error, {migration_not_applied, Version}};
+        Error -> Error
     end.
 
 -spec consistent_read(term(), binary(), list(), replicas(), timeout()) ->

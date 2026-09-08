@@ -51,3 +51,19 @@ out_of_policy_sql_is_rejected_by_command_validation_test() ->
     Sql = <<"INSERT INTO items (value) VALUES (random())">>,
     ?assertEqual({error, {unsupported_replicated_sql, Sql}},
                  erlite_raft_command:new_transaction(<<"tx">>, 0, [{Sql, []}])).
+
+migration_command_has_distinct_policy_and_versions_test() ->
+    Statements = [{<<"CREATE TABLE invoices (id INTEGER PRIMARY KEY)">>, []}],
+    {ok, Command} = erlite_raft_command:new_migration(
+                      <<"billing">>, <<"create-invoices">>, 0, 1, Statements),
+    ?assertEqual(migration, erlite_raft_command:type(Command)),
+    ?assertEqual(0, erlite_raft_command:schema_version(Command)),
+    ?assertEqual(1, erlite_raft_command:target_schema_version(Command)),
+    ?assertEqual(<<"billing">>, erlite_raft_command:migration_set(Command)),
+    ?assertMatch({error, invalid_migration},
+                 erlite_raft_command:new_migration(
+                   <<"billing">>, <<"skip">>, 1, 3, Statements)),
+    ?assertEqual({error, unsupported_migration_sql},
+                 erlite_raft_command:new_migration(
+                   <<"billing">>, <<"data">>, 0, 1,
+                   [{<<"UPDATE invoices SET id = 1">>, []}])).

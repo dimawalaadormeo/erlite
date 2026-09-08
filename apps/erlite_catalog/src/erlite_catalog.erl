@@ -9,6 +9,11 @@
          mark_database_under_replicated/7,
          clear_database_under_replicated/5, prepare_database_repair/7,
          clear_stale_replica/5,
+         create_migration_campaign/3, set_migration_campaign_state/4,
+         record_migration_result/5, migration_campaign/4,
+         advance_database_schema/6,
+         prepare_database_migration/8, finish_database_migration/8,
+         abort_database_migration/6,
          database/4, recoverable_databases/3]).
 
 -spec start(binary(), binary(), [map()]) ->
@@ -135,6 +140,46 @@ prepare_database_repair(ServerRef, DatabaseId, OperationId, Generation, Failed,
 clear_stale_replica(ServerRef, DatabaseId, ServerId, Generation, Timeout) ->
     command(ServerRef,
             {clear_stale_replica, DatabaseId, ServerId, Generation}, Timeout).
+
+create_migration_campaign(ServerRef, Campaign, Timeout) ->
+    command(ServerRef, {create_migration_campaign, Campaign}, Timeout).
+
+set_migration_campaign_state(ServerRef, CampaignId, Status, Timeout) ->
+    command(ServerRef, {set_migration_campaign_state, CampaignId, Status},
+            Timeout).
+
+record_migration_result(ServerRef, CampaignId, DatabaseId, Result, Timeout) ->
+    command(ServerRef,
+            {record_migration_result, CampaignId, DatabaseId, Result}, Timeout).
+
+advance_database_schema(ServerRef, DatabaseId, Generation, From, To, Timeout) ->
+    command(ServerRef,
+            {advance_database_schema, DatabaseId, Generation, From, To}, Timeout).
+
+prepare_database_migration(ServerRef, DatabaseId, CampaignId, MigrationId,
+                           Generation, From, To, Timeout) ->
+    command(ServerRef,
+            {prepare_database_migration, DatabaseId, CampaignId, MigrationId,
+             Generation, From, To}, Timeout).
+
+finish_database_migration(ServerRef, DatabaseId, CampaignId, MigrationId,
+                          Generation, From, To, Timeout) ->
+    command(ServerRef,
+            {finish_database_migration, DatabaseId, CampaignId, MigrationId,
+             Generation, From, To}, Timeout).
+
+abort_database_migration(ServerRef, DatabaseId, CampaignId, MigrationId,
+                         Generation, Timeout) ->
+    command(ServerRef,
+            {abort_database_migration, DatabaseId, CampaignId, MigrationId,
+             Generation}, Timeout).
+
+migration_campaign(ServerId, CampaignId, Timeout, consistent) ->
+    normalize_value_query(ra:consistent_query(
+      ServerId, {erlite_catalog_machine, campaign, [CampaignId]}, Timeout));
+migration_campaign(ServerId, CampaignId, Timeout, local) ->
+    normalize_value_query(ra:local_query(
+      ServerId, {erlite_catalog_machine, campaign, [CampaignId]}, Timeout)).
 
 -spec database(term(), binary(), timeout(), consistent | local) ->
     {ok, map()} | {error, term()} | {timeout, term()}.

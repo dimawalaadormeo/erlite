@@ -69,12 +69,25 @@ apply_entries(_Owner, AppliedIndex, []) ->
     {ok, AppliedIndex};
 apply_entries(Owner, AppliedIndex,
               [{RaftIndex, _Term, Command} | Rest]) ->
-    Statements = erlite_raft_command:statements(Command),
-    TransactionId = erlite_raft_command:transaction_id(Command),
-    CommandHash = erlite_raft_command:hash(Command),
-    case erlite_sqlite_owner:apply_committed(
-           Owner, AppliedIndex, RaftIndex, TransactionId, CommandHash,
-           Statements) of
+    Result = case erlite_raft_command:type(Command) of
+        transaction ->
+            erlite_sqlite_owner:apply_committed(
+              Owner, AppliedIndex, RaftIndex,
+              erlite_raft_command:transaction_id(Command),
+              erlite_raft_command:hash(Command),
+              erlite_raft_command:schema_version(Command),
+              erlite_raft_command:statements(Command));
+        migration ->
+            erlite_sqlite_owner:apply_migration(
+              Owner, AppliedIndex, RaftIndex,
+              erlite_raft_command:migration_set(Command),
+              erlite_raft_command:migration_id(Command),
+              erlite_raft_command:hash(Command),
+              erlite_raft_command:schema_version(Command),
+              erlite_raft_command:target_schema_version(Command),
+              erlite_raft_command:statements(Command))
+    end,
+    case Result of
         {ok, applied} -> apply_entries(Owner, RaftIndex, Rest);
         {ok, already_applied} -> apply_entries(Owner, RaftIndex, Rest);
         {ok, transaction_id_conflict} -> apply_entries(Owner, RaftIndex, Rest);

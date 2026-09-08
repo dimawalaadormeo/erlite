@@ -1,7 +1,7 @@
 -module(erlite_catalog_machine).
 -behaviour(ra_machine).
 
--export([init/1, apply/3, status/1, database/2, recoverable/1]).
+-export([init/1, apply/3, status/1, database/2, recoverable/1, campaign/2]).
 
 -type node_record() :: #{node_id := binary(),
                          node_name := binary(),
@@ -22,7 +22,7 @@ init(#{cluster_id := ClusterId, cluster_name := ClusterName,
       replication_factor => 3,
       quorum => 2,
       nodes => maps:from_list([{maps:get(node_id, Node), Node} || Node <- Nodes]),
-      databases => #{}}.
+      databases => #{}, campaigns => #{}}.
 
 -spec apply(map(), term(), state()) -> {state(), term()}.
 apply(_Meta, {prepare_join, Node0}, State = #{nodes := Nodes}) ->
@@ -107,8 +107,236 @@ apply(_Meta, {prepare_database_repair, DatabaseId, OperationId, Generation,
                             Replacement, State);
 apply(_Meta, {clear_stale_replica, DatabaseId, ServerId, Generation}, State) ->
     clear_stale_replica(DatabaseId, ServerId, Generation, State);
+apply(_Meta, {create_migration_campaign, Campaign}, State) ->
+    create_migration_campaign(Campaign, State);
+apply(_Meta, {set_migration_campaign_state, CampaignId, Status}, State) ->
+    set_migration_campaign_state(CampaignId, Status, State);
+apply(_Meta, {record_migration_result, CampaignId, DatabaseId, Result}, State) ->
+    record_migration_result(CampaignId, DatabaseId, Result, State);
+apply(_Meta, {advance_database_schema, DatabaseId, Generation, From, To}, State) ->
+    advance_database_schema(DatabaseId, Generation, From, To, State);
+apply(_Meta, {prepare_database_migration, DatabaseId, CampaignId, MigrationId,
+              Generation, From, To}, State) ->
+    prepare_database_migration(DatabaseId, CampaignId, MigrationId,
+                               Generation, From, To, State);
+apply(_Meta, {finish_database_migration, DatabaseId, CampaignId, MigrationId,
+              Generation, From, To}, State) ->
+    finish_database_migration(DatabaseId, CampaignId, MigrationId,
+                              Generation, From, To, State);
+apply(_Meta, {abort_database_migration, DatabaseId, CampaignId, MigrationId,
+              Generation}, State) ->
+    abort_database_migration(DatabaseId, CampaignId, MigrationId, Generation,
+                             State);
 apply(_Meta, Command, State) ->
     {State, {error, {unsupported_catalog_command, Command}}}.
+
+create_migration_campaign(
+  Campaign = #{campaign_id := Id, migration_set := Set,
+               idempotency_key := IdempotencyKey, databases := Databases,
+               migrations := Migrations, canary_size := Canary,
+               batch_size := Batch, max_retries := Retries}, State)
+  when is_binary(Id), byte_size(Id) =:= 16, is_binary(Set),
+       is_binary(IdempotencyKey), byte_size(IdempotencyKey) > 0,
+       is_list(Databases), Databases =/= [], is_list(Migrations),
+       Migrations =/= [], is_integer(Canary), Canary > 0,
+       is_integer(Batch), Batch > 0, is_integer(Retries), Retries >= 0 ->
+    Campaigns = maps:get(campaigns, State, #{}),
+    case maps:find(Id, Campaigns) of
+        {ok, Existing} ->
+            case same_campaign_spec(Existing, Campaign) of
+                true -> {State, ok};
+                false -> {State, {error, campaign_id_conflict}}
+            end;
+        error ->
+            Entries = maps:from_list([{Db, #{status => pending, attempts => 0}}
+                                      || Db <- lists:usort(Databases)]),
+            Stored = Campaign#{status => running, entries => Entries},
+            {State#{campaigns => Campaigns#{Id => Stored}}, ok}
+    end;
+create_migration_campaign(_, State) ->
+    {State, {error, invalid_migration_campaign}}.
+
+same_campaign_spec(Existing, Supplied) ->
+    Keys = [campaign_id, migration_set, databases, migrations, canary_size,
+            batch_size, max_retries, idempotency_key],
+    maps:with(Keys, Existing) =:= maps:with(Keys, Supplied).
+
+set_migration_campaign_state(Id, Status, State)
+  when Status =:= running; Status =:= paused ->
+    update_campaign(Id,
+      fun(#{status := Current} = Campaign)
+            when Current =:= running; Current =:= paused ->
+              NewStatus = case Status of
+                  paused -> paused;
+                  running -> campaign_completion(
+                               maps:get(entries, Campaign),
+                               maps:get(max_retries, Campaign))
+              end,
+              {ok, Campaign#{status => NewStatus}};
+         (#{status := Current}) -> {error, {campaign_finished, Current}}
+      end, State);
+set_migration_campaign_state(_, _, State) ->
+    {State, {error, invalid_campaign_state}}.
+
+record_migration_result(Id, DatabaseId, Result, State) ->
+    update_campaign(Id,
+      fun(Campaign = #{entries := Entries}) ->
+          case maps:find(DatabaseId, Entries) of
+              error -> {error, database_not_in_campaign};
+              {ok, Entry} ->
+                  Attempts = maps:get(attempts, Entry) + 1,
+                  NewEntry = case Result of
+                      ok -> Entry#{status => complete, attempts => Attempts};
+                      {error, Reason} -> Entry#{status => failed,
+                                               attempts => Attempts,
+                                               error => Reason}
+                  end,
+                  NewEntries = Entries#{DatabaseId => NewEntry},
+                  Status = case maps:get(status, Campaign) of
+                      paused -> paused;
+                      _ -> campaign_completion(NewEntries,
+                             maps:get(max_retries, Campaign))
+                  end,
+                  {ok, Campaign#{entries => NewEntries, status => Status}}
+          end
+      end, State).
+
+campaign_completion(Entries, MaxRetries) ->
+    Values = maps:values(Entries),
+    case lists:all(fun(#{status := S}) -> S =:= complete end, Values) of
+        true -> complete;
+        false ->
+            case lists:any(fun(#{status := S, attempts := A}) ->
+                                   S =:= failed andalso A > MaxRetries
+                           end, Values) of
+                true -> failed;
+                false -> running
+            end
+    end.
+
+update_campaign(Id, Fun, State) ->
+    Campaigns = maps:get(campaigns, State, #{}),
+    case maps:find(Id, Campaigns) of
+        error -> {State, {error, campaign_not_found}};
+        {ok, Campaign} ->
+            case Fun(Campaign) of
+                {ok, Updated} ->
+                    {State#{campaigns => Campaigns#{Id => Updated}}, ok};
+                {error, _} = Error -> {State, Error}
+            end
+    end.
+
+advance_database_schema(DatabaseId, Generation, From, To, State)
+  when is_integer(From), is_integer(To), To =:= From + 1 ->
+    Databases = maps:get(databases, State, #{}),
+    case maps:find(DatabaseId, Databases) of
+        {ok, #{generation := CurrentGeneration}}
+          when CurrentGeneration =/= Generation ->
+            {State, {error, {stale_generation, Generation,
+                             CurrentGeneration}}};
+        {ok, Existing} ->
+            advance_ready_database_schema(Existing, From, To, State);
+        error -> {State, {error, database_not_found}}
+    end;
+advance_database_schema(_, _, _, _, State) ->
+    {State, {error, invalid_schema_transition}}.
+
+prepare_database_migration(DatabaseId, CampaignId, MigrationId, Generation,
+                           From, To, State)
+  when is_binary(CampaignId), byte_size(CampaignId) =:= 16,
+       is_binary(MigrationId), byte_size(MigrationId) > 0,
+       is_integer(From), To =:= From + 1 ->
+    Databases = maps:get(databases, State, #{}),
+    case maps:find(DatabaseId, Databases) of
+        {ok, #{generation := Current}} when Current =/= Generation ->
+            {State, {error, {stale_generation, Generation, Current}}};
+        {ok, #{state := Lifecycle}} when Lifecycle =/= ready ->
+            {State, {error, {database_not_ready, Lifecycle}}};
+        {ok, #{movement := #{operation_id := OperationId}}} ->
+            {State, {error, {movement_in_progress, OperationId}}};
+        {ok, #{repair := #{operation_id := OperationId}}} ->
+            {State, {error, {repair_in_progress, OperationId}}};
+        {ok, #{migration := #{campaign_id := CampaignId,
+                              migration_id := MigrationId,
+                              from := From, to := To}}} ->
+            {State, ok};
+        {ok, #{migration := #{campaign_id := Current}}} ->
+            {State, {error, {migration_in_progress, Current}}};
+        {ok, Existing = #{schema_version := From}} ->
+            Fence = #{campaign_id => CampaignId, migration_id => MigrationId,
+                      from => From, to => To},
+            put_database(Existing#{migration => Fence}, State);
+        {ok, #{schema_version := To,
+               last_migration := #{campaign_id := CampaignId,
+                                   migration_id := MigrationId}}} ->
+            {State, ok};
+        {ok, #{schema_version := Current}} ->
+            {State, {error, {schema_version_mismatch, From, Current}}};
+        error -> {State, {error, database_not_found}}
+    end;
+prepare_database_migration(_, _, _, _, _, _, State) ->
+    {State, {error, invalid_database_migration}}.
+
+finish_database_migration(DatabaseId, CampaignId, MigrationId, Generation,
+                          From, To, State) ->
+    Databases = maps:get(databases, State, #{}),
+    case maps:find(DatabaseId, Databases) of
+        {ok, Existing = #{state := ready, generation := Generation,
+                          schema_version := From,
+                          migration := #{campaign_id := CampaignId,
+                                         migration_id := MigrationId,
+                                         from := From, to := To}}} ->
+            Completed = #{campaign_id => CampaignId,
+                          migration_id => MigrationId},
+            put_database(maps:remove(migration,
+                         Existing#{schema_version => To,
+                                   last_migration => Completed}), State);
+        {ok, #{state := ready, generation := Generation,
+               schema_version := To,
+               last_migration := #{campaign_id := CampaignId,
+                                   migration_id := MigrationId}}} ->
+            {State, ok};
+        {ok, #{generation := Current}} when Current =/= Generation ->
+            {State, {error, {stale_generation, Generation, Current}}};
+        {ok, #{migration := #{campaign_id := Current}}} ->
+            {State, {error, {migration_in_progress, Current}}};
+        {ok, #{state := Lifecycle}} when Lifecycle =/= ready ->
+            {State, {error, {database_not_ready, Lifecycle}}};
+        {ok, #{schema_version := Current}} ->
+            {State, {error, {schema_version_mismatch, From, Current}}};
+        error -> {State, {error, database_not_found}}
+    end.
+
+abort_database_migration(DatabaseId, CampaignId, MigrationId, Generation,
+                         State) ->
+    Databases = maps:get(databases, State, #{}),
+    case maps:find(DatabaseId, Databases) of
+        {ok, Existing = #{generation := Generation,
+                          migration := #{campaign_id := CampaignId,
+                                         migration_id := MigrationId}}} ->
+            put_database(maps:remove(migration, Existing), State);
+        {ok, #{generation := Generation}} -> {State, ok};
+        {ok, #{generation := Current}} ->
+            {State, {error, {stale_generation, Generation, Current}}};
+        error -> {State, {error, database_not_found}}
+    end.
+
+advance_ready_database_schema(#{state := Lifecycle}, _From, _To, State)
+  when Lifecycle =/= ready ->
+    {State, {error, {database_not_ready, Lifecycle}}};
+advance_ready_database_schema(#{movement := #{operation_id := OperationId}},
+                              _From, _To, State) ->
+    {State, {error, {movement_in_progress, OperationId}}};
+advance_ready_database_schema(#{repair := #{operation_id := OperationId}},
+                              _From, _To, State) ->
+    {State, {error, {repair_in_progress, OperationId}}};
+advance_ready_database_schema(Existing = #{schema_version := From}, From, To,
+                              State) ->
+    put_database(Existing#{schema_version => To}, State);
+advance_ready_database_schema(#{schema_version := To}, _From, To, State) ->
+    {State, ok};
+advance_ready_database_schema(#{schema_version := Current}, From, _To, State) ->
+    {State, {error, {schema_version_mismatch, From, Current}}}.
 
 prepare_unique_join(Node, State = #{nodes := Nodes}) ->
     NodeName = maps:get(node_name, Node),
@@ -186,6 +414,9 @@ prepare_database_delete(DatabaseId, OperationId, Generation,
                 #{generation := Generation, state := ready,
                   movement := #{operation_id := MoveOperation}} ->
                     {State, {error, {movement_in_progress, MoveOperation}}};
+                #{generation := Generation, state := ready,
+                  migration := #{campaign_id := CampaignId}} ->
+                    {State, {error, {migration_in_progress, CampaignId}}};
                 Existing = #{generation := Generation, state := ready} ->
                     put_database(Existing#{state => deleting,
                                            operation_id => OperationId}, State);
@@ -268,10 +499,16 @@ prepare_database_restore_record(undefined, DatabaseId, OperationId, 0, 1,
                    schema_version => maps:get(schema_version, Backup),
                    restore => #{mode => clone, backup => Backup}}, State);
 prepare_database_restore_record(
+  #{state := ready, migration := #{campaign_id := CampaignId}}, _DatabaseId,
+  _OperationId, _ExpectedGeneration, _NewGeneration, _Replicas, _Backup,
+  replace, State) ->
+    {State, {error, {migration_in_progress, CampaignId}}};
+prepare_database_restore_record(
   Existing = #{state := ready, generation := ExpectedGeneration,
                replicas := OldReplicas}, _DatabaseId, OperationId,
   ExpectedGeneration, NewGeneration, Replicas, Backup, replace, State) ->
-    case maps:is_key(movement, Existing) orelse maps:is_key(repair, Existing) of
+    case maps:is_key(movement, Existing) orelse maps:is_key(repair, Existing)
+         orelse maps:is_key(migration, Existing) of
         true -> {State, {error, database_operation_in_progress}};
         false ->
             Restoring = Existing#{state => restoring,
@@ -346,6 +583,10 @@ prepare_database_move(DatabaseId, OperationId, Generation, Source, Replacement,
             end
     end.
 
+prepare_database_move_for_record(
+  #{migration := #{campaign_id := Current}}, _OperationId, _Source,
+  _Replacement, _Replicas, _Databases, _Nodes, State) ->
+    {State, {error, {migration_in_progress, Current}}};
 prepare_database_move_for_record(
   #{repair := #{operation_id := Current}}, _OperationId, _Source,
   _Replacement, _Replicas, _Databases, _Nodes, State) ->
@@ -441,15 +682,17 @@ mark_database_under_replicated(DatabaseId, OperationId, Generation, Failed,
         {false, _} -> {State, {error, invalid_database_repair}};
         {true, Existing = #{state := ready, generation := Generation,
                             replicas := Replicas}} ->
-            case {maps:find(movement, Existing), lists:member(Failed, Replicas),
-                  maps:find(repair, Existing)} of
-                {{ok, #{operation_id := Current}}, _, _} ->
+            case {maps:find(migration, Existing), maps:find(movement, Existing),
+                  lists:member(Failed, Replicas), maps:find(repair, Existing)} of
+                {{ok, #{campaign_id := Current}}, _, _, _} ->
+                    {State, {error, {migration_in_progress, Current}}};
+                {error, {ok, #{operation_id := Current}}, _, _} ->
                     {State, {error, {movement_in_progress, Current}}};
-                {error, false, _} -> {State, {error, failed_not_in_placement}};
-                {error, true, {ok, #{failed := Failed}}} -> {State, ok};
-                {error, true, {ok, #{operation_id := Current}}} ->
+                {error, error, false, _} -> {State, {error, failed_not_in_placement}};
+                {error, error, true, {ok, #{failed := Failed}}} -> {State, ok};
+                {error, error, true, {ok, #{operation_id := Current}}} ->
                     {State, {error, {repair_in_progress, Current}}};
-                {error, true, error} ->
+                {error, error, true, error} ->
                     Repair = #{operation_id => OperationId, failed => Failed,
                                detected_at => DetectedAt, phase => waiting},
                     put_database(Existing#{repair => Repair}, State)
@@ -577,9 +820,16 @@ placement_available(DatabaseId, Replicas, Databases, Nodes) ->
 -spec status(state()) -> map().
 status(State = #{nodes := Nodes}) ->
     Databases = maps:get(databases, State, #{}),
-    (maps:without([nodes, databases], State))#{
+    (maps:without([nodes, databases, campaigns], State))#{
       nodes => lists:sort(maps:values(Nodes)),
-      databases => lists:sort(maps:values(Databases))}.
+      databases => lists:sort(maps:values(Databases)),
+      campaigns => lists:sort(maps:values(maps:get(campaigns, State, #{})))}.
+
+campaign(Id, State) ->
+    case maps:find(Id, maps:get(campaigns, State, #{})) of
+        {ok, Campaign} -> {ok, Campaign};
+        error -> {error, campaign_not_found}
+    end.
 
 -spec database(binary(), state()) -> {ok, map()} | {error, database_not_found}.
 database(DatabaseId, #{databases := Databases}) ->

@@ -188,6 +188,33 @@ replicas. Thus no backup is silently attached to an incompatible live Raft
 history, and a crash leaves a catalog-visible operation that reconciliation can
 resume.
 
+## Fleet migrations
+
+A migration Raft command binds its set, immutable ID, content hash,
+consecutive source and target schema versions, and ordered DDL. The SQLite
+applier executes the DDL, inserts its history row, advances `schema_version`,
+and advances `last_applied_raft_index` in one transaction. Ordinary writes fail
+closed when their expected version differs from the durable version.
+
+A retry at a later Raft index is harmless only when the stored set, ID,
+versions, and hash match. Fleet campaigns are catalog-replicated. Selection is
+deterministic, canaries precede bounded batches, canary failure durably pauses,
+and attempt counts and results come from consistent catalog reads. Process loss
+may cause a retry but cannot skip a version or report unverified work complete.
+Campaign creation requires a caller-supplied idempotency key and deterministically
+derives the catalog ID from that key and migration-set name. A durable pause is
+sticky across results already in flight. Migration admission and catalog schema
+advancement both refuse databases undergoing restore, movement, or repair.
+
+The initial policy permits tables, ordinary indexes, and ALTER/DROP forms. It
+rejects multiple statements, internal objects, triggers, views, virtual
+objects, collations, defaults, generated/time/random expressions, and data DML.
+Forbidden keywords and functions are matched case-insensitively at word
+boundaries, so punctuation and alternate whitespace cannot hide them. The same
+shared validator runs both when a migration command enters Raft and immediately
+before SQLite application; a rejected application does not change schema,
+migration history, schema version, or durable applied index.
+
 ## External service boundary
 
 Phase 6 never exposes a plaintext listener. Enabling the HTTP service requires TLS certificate material and at least one configured bearer credential. Tokens are compared in constant time and removed from the authenticated identity before dispatch. Admin authorization is required for create, delete, and fleet listing; service identities can access only their explicit database allow-list.
