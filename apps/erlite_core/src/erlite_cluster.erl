@@ -99,7 +99,16 @@ status_and_configure(Root, ServerId, Timeout) ->
             case whereis(erlite_database_lifecycle) of
                 Pid when is_pid(Pid) ->
                     case erlite_database_lifecycle:configure(ServerId, Root) of
-                        ok -> Result;
+                        ok ->
+                            case whereis(erlite_replica_repair) of
+                                RepairPid when is_pid(RepairPid) ->
+                                    case erlite_replica_repair:configure(
+                                           ServerId, Root) of
+                                        ok -> Result;
+                                        RepairError -> RepairError
+                                    end;
+                                undefined -> Result
+                            end;
                         Error -> Error
                     end;
                 undefined -> Result

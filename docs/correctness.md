@@ -122,6 +122,26 @@ Phase 7 movement starts by durably recording a single operation-ID-fenced source
 
 Source removal is allowed only from `removing`. An ambiguous add or remove result is reconciled against Ra's committed membership before retry. The old SQLite replica is deleted only after Ra reports the source absent. Placement substitution and generation advancement occur only afterward. Every catalog transition is idempotent, incomplete movement is returned for reconciliation, and a target must be an active catalog node whose Ra server ID is unused. Delete is fenced while a move is incomplete. Controller reconstruction accepts only the old RF=3 set, the temporary four-member set, or the final RF=3 replacement set and derives stable storage roots for both original and replacement replicas. Consequently a crash cannot make an unverified replacement authoritative, silently overlap two movements, race physical deletion, or resurrect a removed source as a blank replica.
 
+## Automatic replica repair
+
+Phase 8 marks a ready RF=3 database under-replicated only when exactly one
+catalog member is unhealthy and the other two named Ra servers are reachable.
+The catalog durably stores the failed server, detection time, and operation ID.
+A recovered server clears a waiting repair; a repair cannot start before the
+configured grace period, with fewer than two healthy members, without an
+active replacement node, or while another movement is in progress.
+
+Repair is a catalog-fenced specialization of durable movement. Snapshot and
+bootstrap use a surviving SQLite replica. The replacement is added, caught up
+through a quorum barrier, and verified before the failed member is removed
+from committed Ra membership. Failure to find or prepare a target leaves the
+original RF=3 membership unchanged and is retried. Completion advances the
+placement generation and records the removed server as stale. The stale server
+is never returned by catalog routing; if its node comes back, its old Ra server
+and SQLite image are deleted before the stale marker is cleared. Cleanup also
+continues after database deletion. These transitions are idempotent and the
+repair and movement fences prevent overlapping membership changes.
+
 ## External service boundary
 
 Phase 6 never exposes a plaintext listener. Enabling the HTTP service requires TLS certificate material and at least one configured bearer credential. Tokens are compared in constant time and removed from the authenticated identity before dispatch. Admin authorization is required for create, delete, and fleet listing; service identities can access only their explicit database allow-list.

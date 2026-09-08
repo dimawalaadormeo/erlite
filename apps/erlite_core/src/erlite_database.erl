@@ -1,7 +1,7 @@
 -module(erlite_database).
 -behaviour(gen_server).
 
--export([start_link/2, delete_resources/2]).
+-export([start_link/2, delete_resources/2, cleanup_stale_replica/3]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(RPC_TIMEOUT, 15000).
@@ -19,6 +19,18 @@ delete_resources(DatabaseId, #{storage_root := StorageRoot,
         Error -> Error
     end;
 delete_resources(_DatabaseId, _Options) -> {error, invalid_database_options}.
+
+cleanup_stale_replica(DatabaseId, StorageRoot, ServerId) ->
+    Root = replica_root(StorageRoot, ServerId, 1),
+    _ = member_call(ServerId, ra, force_delete_server, [default, ServerId]),
+    _ = member_call(ServerId, erlite_sqlite_databases, close,
+                    [Root, DatabaseId]),
+    case member_call(ServerId, erlite_sqlite_databases, delete,
+                     [Root, DatabaseId]) of
+        ok -> ok;
+        {error, database_not_found} -> ok;
+        Error -> Error
+    end.
 
 init({DatabaseId, #{storage_root := StorageRoot,
                     server_ids := ConfiguredServerIds} = Options}) ->
@@ -50,10 +62,14 @@ init({DatabaseId, #{storage_root := StorageRoot,
 init({_DatabaseId, _Options}) -> {stop, invalid_database_options}.
 
 open_for_init(StorageRoot, DatabaseId, ConfiguredServerIds, ServerIds,
-              Options = #{movement := _}) ->
+              Options = #{movement := Movement}) ->
     Roots = movement_replica_roots(StorageRoot, ConfiguredServerIds,
                                    ServerIds, Options),
-    ensure_replicas_with_roots(DatabaseId, Roots);
+    case maps:get(kind, Movement, move) of
+        repair -> ensure_repair_replicas(DatabaseId, Roots,
+                                         maps:get(source, Movement));
+        move -> ensure_replicas_with_roots(DatabaseId, Roots)
+    end;
 open_for_init(StorageRoot, DatabaseId, _ConfiguredServerIds, ServerIds,
               Options) ->
     case maps:get(ensure_existing, Options, false) of
@@ -76,6 +92,14 @@ ensure_replicas_with_roots(DatabaseId, Roots) ->
             close_replicas(DatabaseId, Roots),
             delete_replicas(DatabaseId, CreatedRoots),
             {error, Reason}
+    end.
+
+ensure_repair_replicas(DatabaseId, Roots, Failed) ->
+    AvailableRoots = maps:remove(Failed, Roots),
+    case ensure_replicas_with_roots(DatabaseId, AvailableRoots) of
+        {ok, Replicas, _AvailableRoots, RuntimeIdentity} ->
+            {ok, Replicas, Roots, RuntimeIdentity};
+        Error -> Error
     end.
 
 effective_server_ids(ServerIds,
@@ -188,12 +212,12 @@ add_replacement(Source, Replacement, Generation, Timeout,
 add_new_replacement(Source, Replacement, Generation, Timeout, DatabaseId,
                     StorageRoot, ServerIds, Replicas, Roots, RuntimeIdentity,
                     State) ->
-    case {lists:member(Source, ServerIds), maps:find(Source, Replicas)} of
+    case {lists:member(Source, ServerIds), bootstrap_replica(Source, Replicas)} of
         {false, _} -> {error, source_not_in_placement};
-        {_, error} -> {error, {replica_owner_unavailable, Source}};
-        {true, {ok, SourceOwner}} ->
+        {_, error} -> {error, no_bootstrap_replica_available};
+        {true, {ok, BootstrapSource, SourceOwner}} ->
             ReplacementRoot = replacement_root(StorageRoot, Replacement),
-            case bootstrap_replacement(ServerIds, Source, SourceOwner,
+            case bootstrap_replacement(ServerIds, BootstrapSource, SourceOwner,
                                        Replacement, ReplacementRoot, DatabaseId,
                                        Generation, RuntimeIdentity, Timeout) of
                 {ok, ReplacementOwner} ->
@@ -205,6 +229,31 @@ add_new_replacement(Source, Replacement, Generation, Timeout, DatabaseId,
                                                             ReplacementRoot}}};
                 Error -> Error
             end
+    end.
+
+bootstrap_replica(Preferred, Replicas) ->
+    case maps:find(Preferred, Replicas) of
+        {ok, Owner} ->
+            case replica_owner_alive(Preferred, Owner) of
+                true -> {ok, Preferred, Owner};
+                false -> first_live_replica(maps:to_list(Replicas))
+            end;
+        error -> first_live_replica(maps:to_list(Replicas))
+    end.
+
+first_live_replica([]) -> error;
+first_live_replica([{ServerId, Owner} | Rest]) ->
+    case replica_owner_alive(ServerId, Owner) of
+        true -> {ok, ServerId, Owner};
+        false -> first_live_replica(Rest)
+    end.
+
+replica_owner_alive({_, Node}, Owner) when Node =:= node() ->
+    is_process_alive(Owner);
+replica_owner_alive({_, Node}, Owner) ->
+    case rpc:call(Node, erlang, is_process_alive, [Owner], 2000) of
+        true -> true;
+        _ -> false
     end.
 
 bootstrap_replacement(ServerIds, Source, SourceOwner, Replacement,
@@ -345,16 +394,32 @@ ensure_source_removed(Remaining, Source, Timeout) ->
     case ra:members(Remaining, Timeout) of
         {ok, Members, _Leader} ->
             case lists:member(Source, Members) of
-                false -> benign_force_delete(Source);
+                false -> best_effort_force_delete(Source);
                 true ->
-                    case ra:leave_and_delete_server(
-                           default, Remaining, Source, Timeout) of
-                        ok -> ok;
+                    case ra:remove_member(Remaining, Source, Timeout) of
+                        {ok, _Reply, _} ->
+                            verify_source_removed(Remaining, Source, Timeout);
+                        {error, not_member} ->
+                            verify_source_removed(Remaining, Source, Timeout);
                         Error -> Error
                     end
             end;
         Other -> Other
     end.
+
+verify_source_removed(Remaining, Source, Timeout) ->
+    case ra:members(Remaining, Timeout) of
+        {ok, Members, _Leader} ->
+            case lists:member(Source, Members) of
+                false -> best_effort_force_delete(Source);
+                true -> {error, source_still_in_membership}
+            end;
+        Error -> Error
+    end.
+
+best_effort_force_delete(Source) ->
+    _ = benign_force_delete(Source),
+    ok.
 
 benign_force_delete(Source) ->
     case member_call(Source, ra, force_delete_server, [default, Source]) of
@@ -367,19 +432,13 @@ benign_force_delete(Source) ->
 retire_source(DatabaseId, Source, _Replacement, Remaining, Replicas, Roots,
               State) ->
     SourceRoot = maps:get(Source, Roots),
-    case member_call(Source, erlite_sqlite_databases, close,
-                     [SourceRoot, DatabaseId]) of
-        ok ->
-            case member_call(Source, erlite_sqlite_databases, delete,
-                             [SourceRoot, DatabaseId]) of
-                ok ->
-                    {ok, State#{server_ids => lists:sort(Remaining),
-                                replicas => maps:remove(Source, Replicas),
-                                replica_roots => maps:remove(Source, Roots)}};
-                Error -> Error
-            end;
-        Error -> Error
-    end.
+    _ = member_call(Source, erlite_sqlite_databases, close,
+                    [SourceRoot, DatabaseId]),
+    _ = member_call(Source, erlite_sqlite_databases, delete,
+                    [SourceRoot, DatabaseId]),
+    {ok, State#{server_ids => lists:sort(Remaining),
+                replicas => maps:remove(Source, Replicas),
+                replica_roots => maps:remove(Source, Roots)}}.
 
 replacement_root(StorageRoot, Replacement) ->
     Digest = binary:encode_hex(

@@ -1,15 +1,91 @@
 # Erlite
 
-Erlite is an Erlang/OTP runtime for operating many independently replicated SQLite databases across a cluster.
+Erlite is an Erlang/OTP runtime for operating many independently replicated
+SQLite databases across a cluster. Each database is an independent RabbitMQ
+`ra` group backed by SQLite, allowing capacity to grow by placing and moving
+databases across Erlite nodes.
 
-The project is being implemented incrementally according to [`ERLITE_PROJECT.md`](ERLITE_PROJECT.md). Phases 0 through 7 now provide the supervised SQLite boundary, replication correctness primitives, persistent node identity and configuration, a three-member RabbitMQ `ra` cluster catalog, single-database high availability, isolated lifecycle management for multiple databases, durable catalog-fenced database workflows, restart reconciliation, transparent ready-only routing, a TLS HTTP/JSON service, node expansion, and durable per-database replica movement.
+Development follows the phased plan in
+[`ERLITE_PROJECT.md`](ERLITE_PROJECT.md). Phases 0 through 8 are complete; the
+next roadmap item is automatic rebalancing.
+
+## Current capabilities
+
+- Persistent node identity and a three-member replicated cluster catalog
+- RF=3 database creation, listing, status, deletion, and restart reconciliation
+- Quorum-ordered writes and consistent reads with durable SQLite applied indexes
+- Leader election, follower catch-up, idempotent transactions, and quorum-loss
+  write refusal
+- TLS-only HTTP/JSON access with bearer authentication and database-scoped
+  authorization
+- Durable, resumable database movement during node expansion
+- Automatic under-replication detection and repair after a configurable grace
+  period
+- Verified replacement bootstrap before failed-member removal
+- Quarantine and cleanup of stale replicas when failed nodes return
+
+Erlite scales across independent databases. It does not make one SQLite
+database horizontally multi-writer, provide cross-database transactions, or
+act as a general-purpose distributed SQL engine.
+
+## Correctness model
+
+The Raft log is authoritative for write order. SQLite replicas durably record
+the Raft index they have applied, and a replacement is not considered ready
+until its Ra state and SQLite state have caught up and been verified. Movement
+and repair are serialized per database and recorded in the catalog so they can
+resume after interruption.
+
+See [`docs/correctness.md`](docs/correctness.md) and
+[`docs/architecture.md`](docs/architecture.md) for the detailed invariants.
+
+## Getting started
+
+Build the release command:
+
+```bash
+rebar3 compile
+rebar3 escriptize
+```
+
+The generated `erlite` command supports:
+
+```text
+erlite init-cluster
+erlite join <seed-node>
+erlite leave
+erlite cluster status
+```
+
+A production deployment requires three Erlite nodes with compatible Erlang
+distribution names and cookies. Setup, database operations, movement, and API
+examples are in [`docs/user-guide.md`](docs/user-guide.md).
+
+## Automatic repair
+
+Automatic repair is supervised and enabled by default. Its timing can be set
+in the `erlite_core` application environment:
+
+```erlang
+{repair_grace_period_ms, 30000},
+{repair_scan_interval_ms, 5000}
+```
+
+When exactly one RF=3 member fails, Erlite waits for the grace period and then
+uses a surviving replica to bootstrap an eligible active node. The failed
+member is removed only after the replacement catches up and verifies. If no
+safe target exists—or fewer than two replicas are healthy—the repair remains
+pending without reducing membership.
+
+The accepted movement and repair protocols are documented in
+[`docs/adr/0001-durable-database-movement.md`](docs/adr/0001-durable-database-movement.md)
+and
+[`docs/adr/0002-automatic-replica-repair.md`](docs/adr/0002-automatic-replica-repair.md).
 
 ## License
 
 Erlite is licensed under the [Apache License 2.0](LICENSE). Dependency license
 details are recorded in [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md).
-
-See [`docs/user-guide.md`](docs/user-guide.md) for setup and usage instructions.
 
 ## Requirements
 
@@ -26,4 +102,6 @@ rebar3 ct
 rebar3 escriptize
 ```
 
-The generated command supports `init-cluster`, `join <seed-node>`, `leave`, and `cluster status`. Distributed Erlang naming and cookies must be configured when starting the command VM. Phase 6 adds an optional TLS HTTP/JSON service documented in [`docs/http-api.md`](docs/http-api.md), with Python and PHP examples under `examples/`.
+The optional TLS HTTP/JSON service is documented in
+[`docs/http-api.md`](docs/http-api.md), with Python and PHP clients under
+[`examples/`](examples/).

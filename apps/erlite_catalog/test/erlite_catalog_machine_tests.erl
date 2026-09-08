@@ -179,6 +179,66 @@ database_move_rejects_unsafe_replacement_test() ->
           {prepare_database_move, DatabaseId, <<11:128>>, 1, hd(Replicas),
            {replacement, 'not-active@host'}}, State).
 
+database_repair_is_durable_serialized_and_tracks_stale_replica_test() ->
+    DatabaseId = <<"merchant-repair">>,
+    Replicas = database_replicas(one),
+    Failed = hd(Replicas),
+    Replacement = {repair_replacement, node()},
+    OperationId = <<15:128>>,
+    State0 = ready_database(DatabaseId, <<14:128>>, Replicas),
+    Mark = {mark_database_under_replicated, DatabaseId, OperationId, 1,
+            Failed, 1000},
+    {State1, ok} = erlite_catalog_machine:apply(#{index => 3}, Mark, State0),
+    {State1, ok} = erlite_catalog_machine:apply(#{index => 4}, Mark, State1),
+    {ok, #{repair := #{phase := waiting, detected_at := 1000}}} =
+        erlite_catalog_machine:database(DatabaseId, State1),
+    {State1, {error, {repair_in_progress, OperationId}}} =
+        erlite_catalog_machine:apply(
+          #{index => 5},
+          {prepare_database_move, DatabaseId, <<16:128>>, 1, Failed,
+           Replacement}, State1),
+    Prepare = {prepare_database_repair, DatabaseId, OperationId, 1, Failed,
+               Replacement},
+    {State2, ok} = erlite_catalog_machine:apply(#{index => 6}, Prepare, State1),
+    {State2, ok} = erlite_catalog_machine:apply(#{index => 7}, Prepare, State2),
+    {ok, #{repair := #{phase := repairing},
+           movement := #{phase := adding, kind := repair}}} =
+        erlite_catalog_machine:database(DatabaseId, State2),
+    {State3, ok} = erlite_catalog_machine:apply(
+                     #{index => 8},
+                     {mark_database_replacement_ready, DatabaseId,
+                      OperationId, 1}, State2),
+    {State4, ok} = erlite_catalog_machine:apply(
+                     #{index => 9},
+                     {finish_database_move, DatabaseId, OperationId, 1},
+                     State3),
+    {ok, #{generation := 2, stale_replicas := [Stale]} = Final} =
+        erlite_catalog_machine:database(DatabaseId, State4),
+    false = maps:is_key(repair, Final),
+    false = maps:is_key(movement, Final),
+    Failed = maps:get(server_id, Stale),
+    {State5, ok} = erlite_catalog_machine:apply(
+                     #{index => 10},
+                     {clear_stale_replica, DatabaseId, Failed, 2}, State4),
+    {ok, Clean} = erlite_catalog_machine:database(DatabaseId, State5),
+    false = maps:is_key(stale_replicas, Clean).
+
+transient_under_replication_can_be_cleared_before_repair_test() ->
+    DatabaseId = <<"merchant-transient-failure">>,
+    Replicas = database_replicas(one),
+    OperationId = <<17:128>>,
+    State0 = ready_database(DatabaseId, <<18:128>>, Replicas),
+    {State1, ok} = erlite_catalog_machine:apply(
+                     #{index => 3},
+                     {mark_database_under_replicated, DatabaseId, OperationId,
+                      1, hd(Replicas), 2000}, State0),
+    {State2, ok} = erlite_catalog_machine:apply(
+                     #{index => 4},
+                     {clear_database_under_replicated, DatabaseId,
+                      OperationId, 1}, State1),
+    {ok, Database} = erlite_catalog_machine:database(DatabaseId, State2),
+    false = maps:is_key(repair, Database).
+
 ready_database(DatabaseId, OperationId, Replicas) ->
     State0 = catalog_state(),
     {State1, ok} = erlite_catalog_machine:apply(
