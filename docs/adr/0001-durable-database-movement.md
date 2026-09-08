@@ -30,8 +30,13 @@ The workflow is:
 6. Commit replacement readiness by changing the movement to `removing`.
 7. Remove and delete the source Ra member, then close and delete its SQLite
    replica.
+
 8. Atomically publish the new RF=3 placement, advance the placement generation,
    and clear the active movement.
+
+If a crash occurs after committed source removal but before local file cleanup,
+reconciliation may defer the idempotent cleanup without making the source live
+or routable again.
 
 Retries first inspect catalog state and actual Ra membership. Existing snapshot
 artifacts, a started replacement, an already-added replacement, an already-
@@ -51,4 +56,3 @@ Movement temporarily uses four Ra members and one additional SQLite image. It
 prioritizes recoverability over transfer cost. Automatic planning, throttling,
 and repair remain later roadmap phases; Phase 7 exposes an explicit movement
 operation and performs one movement per database at a time.
-

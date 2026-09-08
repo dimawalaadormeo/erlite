@@ -86,6 +86,19 @@ apply(_Meta, {mark_database_replacement_ready, DatabaseId, OperationId,
                              adding, removing, State);
 apply(_Meta, {finish_database_move, DatabaseId, OperationId, Generation}, State) ->
     finish_database_move(DatabaseId, OperationId, Generation, State);
+apply(_Meta, {mark_database_under_replicated, DatabaseId, OperationId,
+              Generation, Failed, DetectedAt}, State) ->
+    mark_database_under_replicated(DatabaseId, OperationId, Generation, Failed,
+                                   DetectedAt, State);
+apply(_Meta, {clear_database_under_replicated, DatabaseId, OperationId,
+              Generation}, State) ->
+    clear_database_under_replicated(DatabaseId, OperationId, Generation, State);
+apply(_Meta, {prepare_database_repair, DatabaseId, OperationId, Generation,
+              Failed, Replacement}, State) ->
+    prepare_database_repair(DatabaseId, OperationId, Generation, Failed,
+                            Replacement, State);
+apply(_Meta, {clear_stale_replica, DatabaseId, ServerId, Generation}, State) ->
+    clear_stale_replica(DatabaseId, ServerId, Generation, State);
 apply(_Meta, Command, State) ->
     {State, {error, {unsupported_catalog_command, Command}}}.
 
@@ -217,6 +230,10 @@ prepare_database_move(DatabaseId, OperationId, Generation, Source, Replacement,
     end.
 
 prepare_database_move_for_record(
+  #{repair := #{operation_id := Current}}, _OperationId, _Source,
+  _Replacement, _Replicas, _Databases, _Nodes, State) ->
+    {State, {error, {repair_in_progress, Current}}};
+prepare_database_move_for_record(
   #{movement := #{operation_id := OperationId, source := Source,
                   replacement := Replacement}},
   OperationId, Source, Replacement, _Replicas, _Databases, _Nodes, State) ->
@@ -271,11 +288,16 @@ finish_database_move(DatabaseId, OperationId, Generation, State) ->
             Completed = #{operation_id => OperationId, source => Source,
                           replacement => Replacement,
                           from_generation => Generation},
-            put_database(maps:remove(
-                           movement,
-                           Existing#{replicas => NewReplicas,
-                                     generation => Generation + 1,
-                                     last_movement => Completed}), State);
+            Stale = #{server_id => Source, generation => Generation},
+            ExistingStale = maps:get(stale_replicas, Existing, []),
+            Finished = maps:remove(
+                         repair,
+                         Existing#{replicas => NewReplicas,
+                                   generation => Generation + 1,
+                                   last_movement => Completed,
+                                   stale_replicas =>
+                                       lists:usort([Stale | ExistingStale])}),
+            put_database(maps:remove(movement, Finished), State);
         #{state := ready, generation := CompletedGeneration,
           last_movement := #{operation_id := OperationId,
                              from_generation := Generation}}
@@ -291,6 +313,92 @@ move_fence_error(#{movement := #{operation_id := Current}}, OperationId, _)
 move_fence_error(#{movement := #{phase := Phase}}, _OperationId, _) ->
     {error, {invalid_movement_transition, Phase}};
 move_fence_error(_Existing, _OperationId, _) -> {error, no_movement_in_progress}.
+
+mark_database_under_replicated(DatabaseId, OperationId, Generation, Failed,
+                               DetectedAt, State) ->
+    Databases = maps:get(databases, State, #{}),
+    Valid = valid_identity(DatabaseId, OperationId, Generation) andalso
+        valid_server_id(Failed) andalso is_integer(DetectedAt) andalso
+        DetectedAt >= 0,
+    case {Valid, maps:get(DatabaseId, Databases, undefined)} of
+        {false, _} -> {State, {error, invalid_database_repair}};
+        {true, Existing = #{state := ready, generation := Generation,
+                            replicas := Replicas}} ->
+            case {maps:find(movement, Existing), lists:member(Failed, Replicas),
+                  maps:find(repair, Existing)} of
+                {{ok, #{operation_id := Current}}, _, _} ->
+                    {State, {error, {movement_in_progress, Current}}};
+                {error, false, _} -> {State, {error, failed_not_in_placement}};
+                {error, true, {ok, #{failed := Failed}}} -> {State, ok};
+                {error, true, {ok, #{operation_id := Current}}} ->
+                    {State, {error, {repair_in_progress, Current}}};
+                {error, true, error} ->
+                    Repair = #{operation_id => OperationId, failed => Failed,
+                               detected_at => DetectedAt, phase => waiting},
+                    put_database(Existing#{repair => Repair}, State)
+            end;
+        {true, undefined} -> {State, {error, database_not_found}};
+        {true, Existing} -> {State, fence_error(Existing, Generation)}
+    end.
+
+clear_database_under_replicated(DatabaseId, OperationId, Generation, State) ->
+    Databases = maps:get(databases, State, #{}),
+    case maps:get(DatabaseId, Databases, undefined) of
+        Existing = #{state := ready, generation := Generation,
+                     repair := #{operation_id := OperationId,
+                                 phase := waiting}} ->
+            put_database(maps:remove(repair, Existing), State);
+        Existing = #{state := ready, generation := Generation} ->
+            case maps:is_key(repair, Existing) of
+                false -> {State, ok};
+                true -> {State, {error, repair_already_started}}
+            end;
+        undefined -> {State, {error, database_not_found}};
+        Existing -> {State, fence_error(Existing, Generation)}
+    end.
+
+prepare_database_repair(DatabaseId, OperationId, Generation, Failed,
+                        Replacement, State) ->
+    Databases = maps:get(databases, State, #{}),
+    case maps:get(DatabaseId, Databases, undefined) of
+        Existing = #{state := ready, generation := Generation,
+                     repair := #{operation_id := OperationId,
+                                 failed := Failed, phase := waiting}} ->
+            case replacement_available(Replacement, Databases,
+                                       maps:get(nodes, State)) of
+                true ->
+                    Movement = #{operation_id => OperationId, source => Failed,
+                                 replacement => Replacement, phase => adding,
+                                 kind => repair},
+                    put_database(Existing#{movement => Movement,
+                                           repair =>
+                                               (maps:get(repair, Existing))#{
+                                                 phase => repairing}}, State);
+                false -> {State, {error, replacement_unavailable}}
+            end;
+        #{state := ready, generation := Generation,
+          movement := #{operation_id := OperationId, source := Failed,
+                        replacement := Replacement, kind := repair}} ->
+            {State, ok};
+        undefined -> {State, {error, database_not_found}};
+        Existing -> {State, move_fence_error(Existing, OperationId, Generation)}
+    end.
+
+clear_stale_replica(DatabaseId, ServerId, Generation, State) ->
+    Databases = maps:get(databases, State, #{}),
+    case maps:get(DatabaseId, Databases, undefined) of
+        Existing = #{generation := Generation} ->
+            Stale = maps:get(stale_replicas, Existing, []),
+            Remaining = [Entry || Entry <- Stale,
+                                  maps:get(server_id, Entry) =/= ServerId],
+            Updated = case Remaining of
+                          [] -> maps:remove(stale_replicas, Existing);
+                          _ -> Existing#{stale_replicas => Remaining}
+                      end,
+            put_database(Updated, State);
+        undefined -> {State, {error, database_not_found}};
+        Existing -> {State, fence_error(Existing, Generation)}
+    end.
 
 replacement_available({_Name, ErlangNode} = Replacement, Databases, Nodes) ->
     ActiveNodes = [element(2, maps:get(server_id, NodeRecord))

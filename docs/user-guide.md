@@ -1,6 +1,6 @@
 # Erlite User Guide
 
-This guide covers the functionality implemented through Phase 7. Erlite is
+This guide covers the functionality implemented through Phase 8. Erlite is
 currently a development-stage Erlang/OTP runtime for operating many isolated,
 Raft-replicated SQLite databases.
 
@@ -116,6 +116,25 @@ There is not yet a CLI or HTTPS endpoint for this operation. Operators should
 inspect `erlite_catalog:database/4` after completion and confirm the new
 generation and RF=3 replica set before issuing `erlite leave` on a drained
 node.
+
+## Configure automatic replica repair
+
+Automatic repair is supervised and enabled by default. These `erlite_core`
+application settings control failure confirmation and scan frequency:
+
+```erlang
+{repair_grace_period_ms, 30000},
+{repair_scan_interval_ms, 5000}
+```
+
+When one RF=3 member is unavailable, Erlite records the failure and waits for
+the grace period. If the member remains down and an active node outside the
+current placement is available, Erlite bootstraps and verifies a replacement
+before removing the failed member. With no safe target or fewer than two
+healthy replicas, repair remains pending and membership is not reduced.
+
+If the old node later returns, catalog routing keeps its obsolete replica
+quarantined while the repair worker removes its stale Ra and SQLite state.
 
 ## Enable the HTTPS API
 

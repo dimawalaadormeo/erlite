@@ -3,11 +3,13 @@
 -export([all/0, init_per_suite/1, end_per_suite/1,
          expand_three_to_four_and_move/1,
          expand_four_to_six_and_move/1,
-         movement_reconciles_membership_crash_points/1]).
+         movement_reconciles_membership_crash_points/1,
+         movement_reconciles_registry_crash/1]).
 
 all() -> [expand_three_to_four_and_move,
           expand_four_to_six_and_move,
-          movement_reconciles_membership_crash_points].
+          movement_reconciles_membership_crash_points,
+          movement_reconciles_registry_crash].
 
 init_per_suite(Config) ->
     case node() of
@@ -166,6 +168,91 @@ crash_after_remove(Catalog, TargetNode) ->
     kill_controller(DatabaseId),
     restart_lifecycle(),
     await_move_complete(Catalog, DatabaseId, Generation + 1, 30000).
+
+movement_reconciles_registry_crash(Config) ->
+    Catalog = proplists:get_value(catalog, Config),
+    {_, Node4, _} = lists:nth(4, proplists:get_value(peers, Config)),
+    ok = ensure_catalog_node(Catalog, Node4, 4),
+    crash_registry_after_add(Catalog, Node4),
+    crash_registry_after_remove(Catalog, Node4),
+    ok.
+
+%% The controller is deliberately left running in both scenarios below: the
+%% point is to verify that erlite_databases losing and rebuilding its own
+%% in-memory routing state mid-movement does not disturb, duplicate, or lose
+%% track of an unrelated, still-live movement controller.
+crash_registry_after_add(Catalog, TargetNode) ->
+    DatabaseId = <<"phase7-registry-crash-after-add">>,
+    {Source, Replacement, Generation, _OperationId} =
+        prepare_test_move(Catalog, DatabaseId, TargetNode, registry_add),
+    ok = erlite_databases:add_replacement(
+           DatabaseId, Source, Replacement, Generation, 15000),
+    restart_registry(DatabaseId),
+    restart_lifecycle(),
+    await_move_complete(Catalog, DatabaseId, Generation + 1, 30000).
+
+crash_registry_after_remove(Catalog, TargetNode) ->
+    DatabaseId = <<"phase7-registry-crash-after-remove">>,
+    {Source, Replacement, Generation, OperationId} =
+        prepare_test_move(Catalog, DatabaseId, TargetNode, registry_remove),
+    ok = erlite_databases:add_replacement(
+           DatabaseId, Source, Replacement, Generation, 15000),
+    ok = erlite_catalog:mark_database_replacement_ready(
+           Catalog, DatabaseId, OperationId, Generation, 15000),
+    ok = erlite_databases:remove_source(
+           DatabaseId, Source, Replacement, 15000),
+    restart_registry(DatabaseId),
+    restart_lifecycle(),
+    await_move_complete(Catalog, DatabaseId, Generation + 1, 30000).
+
+restart_registry(DatabaseId) ->
+    [{DatabaseId, ControllerBefore}] =
+        ets:lookup(erlite_database_routes, DatabaseId),
+    OldPid = whereis(erlite_databases),
+    exit(OldPid, kill),
+    await_registry_restart(OldPid, 5000),
+    ControllerAfter = await_route_restored(DatabaseId, ControllerBefore, 5000),
+    true = is_process_alive(ControllerAfter).
+
+%% gen_server registers its name before Mod:init/1 runs (see gen:init_it/7),
+%% so whereis/1 can observe the restarted erlite_databases before it has
+%% recreated and repopulated erlite_database_routes (the ETS table is owned
+%% by the process and is destroyed with it, with no heir configured). Poll
+%% the route instead of asserting on it immediately after the pid changes.
+await_registry_restart(OldPid, Timeout) ->
+    Deadline = erlang:monotonic_time(millisecond) + Timeout,
+    await_registry_restart(OldPid, Deadline, whereis(erlite_databases)).
+
+await_registry_restart(OldPid, _Deadline, Pid)
+  when is_pid(Pid), Pid =/= OldPid -> ok;
+await_registry_restart(OldPid, Deadline, _Pid) ->
+    case erlang:monotonic_time(millisecond) >= Deadline of
+        true -> ct:fail(database_registry_did_not_restart);
+        false ->
+            timer:sleep(10),
+            await_registry_restart(OldPid, Deadline, whereis(erlite_databases))
+    end.
+
+await_route_restored(DatabaseId, ControllerBefore, Timeout) ->
+    Deadline = erlang:monotonic_time(millisecond) + Timeout,
+    await_route_restored(DatabaseId, ControllerBefore, Deadline,
+                         safe_route_lookup(DatabaseId)).
+
+await_route_restored(_DatabaseId, ControllerBefore, _Deadline,
+                     [{_, ControllerBefore}]) -> ControllerBefore;
+await_route_restored(DatabaseId, ControllerBefore, Deadline, Last) ->
+    case erlang:monotonic_time(millisecond) >= Deadline of
+        true -> ct:fail({registry_route_not_restored, ControllerBefore, Last});
+        false ->
+            timer:sleep(10),
+            await_route_restored(DatabaseId, ControllerBefore, Deadline,
+                                 safe_route_lookup(DatabaseId))
+    end.
+
+safe_route_lookup(DatabaseId) ->
+    try ets:lookup(erlite_database_routes, DatabaseId)
+    catch error:badarg -> []
+    end.
 
 prepare_test_move(Catalog, DatabaseId, TargetNode, Suffix) ->
     ok = erlite_database_lifecycle:create(DatabaseId),

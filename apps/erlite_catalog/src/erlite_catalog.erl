@@ -5,6 +5,9 @@
          prepare_database_delete/5, tombstone_database/5,
          prepare_database_move/7, mark_database_replacement_ready/5,
          finish_database_move/5,
+         mark_database_under_replicated/7,
+         clear_database_under_replicated/5, prepare_database_repair/7,
+         clear_stale_replica/5,
          database/4, recoverable_databases/3]).
 
 -spec start(binary(), binary(), [map()]) ->
@@ -84,6 +87,39 @@ finish_database_move(ServerRef, DatabaseId, OperationId, Generation, Timeout) ->
     command(ServerRef,
             {finish_database_move, DatabaseId, OperationId, Generation},
             Timeout).
+
+-spec mark_database_under_replicated(term(), binary(), binary(), pos_integer(),
+                                     term(), non_neg_integer(), timeout()) ->
+    ok | {error, term()} | {timeout, term()}.
+mark_database_under_replicated(ServerRef, DatabaseId, OperationId, Generation,
+                               Failed, DetectedAt, Timeout) ->
+    command(ServerRef,
+            {mark_database_under_replicated, DatabaseId, OperationId,
+             Generation, Failed, DetectedAt}, Timeout).
+
+-spec clear_database_under_replicated(term(), binary(), binary(), pos_integer(),
+                                      timeout()) ->
+    ok | {error, term()} | {timeout, term()}.
+clear_database_under_replicated(ServerRef, DatabaseId, OperationId, Generation,
+                                Timeout) ->
+    command(ServerRef,
+            {clear_database_under_replicated, DatabaseId, OperationId,
+             Generation}, Timeout).
+
+-spec prepare_database_repair(term(), binary(), binary(), pos_integer(), term(),
+                              term(), timeout()) ->
+    ok | {error, term()} | {timeout, term()}.
+prepare_database_repair(ServerRef, DatabaseId, OperationId, Generation, Failed,
+                        Replacement, Timeout) ->
+    command(ServerRef,
+            {prepare_database_repair, DatabaseId, OperationId, Generation,
+             Failed, Replacement}, Timeout).
+
+-spec clear_stale_replica(term(), binary(), term(), pos_integer(), timeout()) ->
+    ok | {error, term()} | {timeout, term()}.
+clear_stale_replica(ServerRef, DatabaseId, ServerId, Generation, Timeout) ->
+    command(ServerRef,
+            {clear_stale_replica, DatabaseId, ServerId, Generation}, Timeout).
 
 -spec database(term(), binary(), timeout(), consistent | local) ->
     {ok, map()} | {error, term()} | {timeout, term()}.

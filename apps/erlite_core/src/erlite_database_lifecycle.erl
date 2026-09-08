@@ -242,15 +242,20 @@ reconcile_one(#{database_id := DatabaseId,
     end.
 
 ensure_movement_controller(DatabaseId, Replicas,
-                           #{source := Source, replacement := Replacement},
+                           Movement = #{source := Source,
+                                        replacement := Replacement},
                            #{storage_root := StorageRoot}) ->
     case erlite_databases:status(DatabaseId) of
         {ok, _} -> ok;
         {error, database_not_found} ->
             Options = #{storage_root => StorageRoot, server_ids => Replicas,
                         ensure_existing => true,
-                        movement => #{source => Source,
-                                      replacement => Replacement},
+                        movement => maps:with(
+                                      [source, replacement, kind],
+                                      #{source => Source,
+                                        replacement => Replacement,
+                                        kind => maps:get(kind, Movement,
+                                                         move)}),
                         allowed_extra_server_ids => [Replacement]},
             case erlite_databases:ensure(DatabaseId, Options) of
                 {ok, _Pid} -> ok;

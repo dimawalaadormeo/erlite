@@ -874,10 +874,11 @@ Build:
 
 Provide PHP and Python examples.
 
-**Development checkpoint (2026-09-08):** Phase 7 is complete. Final verification
-completed 80 EUnit tests and 14 Common Test cases, including real peer-node
-expansion, movement, and crash reconciliation. Resume with Phase 8 automatic
-replica repair.
+**Development checkpoint (2026-09-08):** Phase 8 is complete. Automatic repair
+is catalog-fenced, grace-delayed, resumable, and tested against a real failed
+member, unavailable replacement capacity, successful catch-up, and stale-node
+return. Final verification completed 82 EUnit tests and 15 Common Test cases.
+Resume with Phase 9 automatic rebalancing.
 
 ### Phase 7 — Node expansion and database movement
 
@@ -891,6 +892,8 @@ Phase 7 provides explicit, per-database movement to an active target node. The w
 
 ### Phase 8 — Automatic replica repair
 
+**Status: complete**
+
 Build:
 
 - under-replication detection
@@ -899,6 +902,13 @@ Build:
 - bootstrap/catch-up
 - safe membership replacement
 - stale/orphan cleanup
+
+The supervised repair worker detects one failed RF=3 member, persists the
+failure and grace-period deadline, chooses an active replacement, and reuses
+the verified Phase 7 movement protocol with a surviving snapshot source.
+Failed or unavailable repair targets never reduce membership. Removed copies
+remain catalog-tracked and quarantined until their returning node can be
+cleaned.
 
 ### Phase 9 — Automatic rebalancing
 
