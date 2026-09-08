@@ -86,6 +86,14 @@ apply(_Meta, {mark_database_replacement_ready, DatabaseId, OperationId,
                              adding, removing, State);
 apply(_Meta, {finish_database_move, DatabaseId, OperationId, Generation}, State) ->
     finish_database_move(DatabaseId, OperationId, Generation, State);
+apply(_Meta, {prepare_database_restore, DatabaseId, OperationId,
+              ExpectedGeneration, NewGeneration, Replicas, Backup, Mode},
+      State) ->
+    prepare_database_restore(DatabaseId, OperationId, ExpectedGeneration,
+                             NewGeneration, Replicas, Backup, Mode, State);
+apply(_Meta, {finish_database_restore, DatabaseId, OperationId, Generation},
+      State) ->
+    finish_database_restore(DatabaseId, OperationId, Generation, State);
 apply(_Meta, {mark_database_under_replicated, DatabaseId, OperationId,
               Generation, Failed, DetectedAt}, State) ->
     mark_database_under_replicated(DatabaseId, OperationId, Generation, Failed,
@@ -209,6 +217,115 @@ new_database(DatabaseId, OperationId, Generation, Replicas) ->
       operation_id => OperationId, generation => Generation,
       replicas => lists:sort(Replicas), replication_factor => 3,
       schema_version => 0}.
+
+prepare_database_restore(DatabaseId, OperationId, ExpectedGeneration,
+                         NewGeneration, Replicas, Backup, Mode,
+                         State = #{nodes := Nodes}) ->
+    Databases = maps:get(databases, State, #{}),
+    Canonical = lists:sort(Replicas),
+    case valid_backup(Backup) of
+        false -> {State, {error, invalid_database_restore}};
+        true ->
+            case Mode =:= replace andalso
+                 maps:get(database_id, Backup) =/= DatabaseId of
+                true -> {State, {error, backup_database_mismatch}};
+                false ->
+                    prepare_valid_database_restore(
+                      DatabaseId, OperationId, ExpectedGeneration,
+                      NewGeneration, Canonical, Backup, Mode, Databases, Nodes,
+                      State)
+            end
+    end.
+
+prepare_valid_database_restore(DatabaseId, OperationId, ExpectedGeneration,
+                               NewGeneration, Replicas, Backup, Mode,
+                               Databases, Nodes, State) ->
+    Valid = valid_database_operation(DatabaseId, OperationId, NewGeneration,
+                                     Replicas) andalso
+        ((Mode =:= replace andalso NewGeneration =:= ExpectedGeneration + 1)
+         orelse (Mode =:= clone andalso ExpectedGeneration =:= 0 andalso
+                 NewGeneration =:= 1)),
+    case Valid andalso placement_available(DatabaseId, Replicas, Databases,
+                                            Nodes) of
+        false -> {State, {error, invalid_database_restore}};
+        true -> prepare_database_restore_record(
+                  maps:get(DatabaseId, Databases, undefined), DatabaseId,
+                  OperationId, ExpectedGeneration, NewGeneration, Replicas,
+                  Backup, Mode, State)
+    end.
+
+prepare_database_restore_record(
+  #{state := restoring, operation_id := OperationId,
+    generation := NewGeneration, replicas := Replicas,
+    restore := #{backup := Backup, mode := Mode}}, _DatabaseId, OperationId,
+  _Expected, NewGeneration, Replicas, Backup, Mode, State) ->
+    {State, ok};
+prepare_database_restore_record(undefined, DatabaseId, OperationId, 0, 1,
+                                Replicas, Backup, clone, State) ->
+    put_database(#{database_id => DatabaseId, state => restoring,
+                   operation_id => OperationId, generation => 1,
+                   replicas => Replicas, replication_factor => 3,
+                   schema_version => maps:get(schema_version, Backup),
+                   restore => #{mode => clone, backup => Backup}}, State);
+prepare_database_restore_record(
+  Existing = #{state := ready, generation := ExpectedGeneration,
+               replicas := OldReplicas}, _DatabaseId, OperationId,
+  ExpectedGeneration, NewGeneration, Replicas, Backup, replace, State) ->
+    case maps:is_key(movement, Existing) orelse maps:is_key(repair, Existing) of
+        true -> {State, {error, database_operation_in_progress}};
+        false ->
+            Restoring = Existing#{state => restoring,
+                                  operation_id => OperationId,
+                                  generation => NewGeneration,
+                                  replicas => Replicas,
+                                  schema_version => maps:get(schema_version,
+                                                             Backup),
+                                  restore => #{mode => replace,
+                                               backup => Backup,
+                                               previous_generation =>
+                                                   ExpectedGeneration,
+                                               previous_replicas =>
+                                                   OldReplicas}},
+            put_database(Restoring, State)
+    end;
+prepare_database_restore_record(undefined, _DatabaseId, _OperationId,
+                                _Expected, _New, _Replicas, _Backup, replace,
+                                State) ->
+    {State, {error, database_not_found}};
+prepare_database_restore_record(Existing, _DatabaseId, _OperationId,
+                                Expected, _New, _Replicas, _Backup, _Mode,
+                                State) ->
+    {State, fence_error(Existing, Expected)}.
+
+valid_backup(#{database_id := Id, generation := Generation,
+               raft_index := Index, raft_term := Term,
+               schema_version := SchemaVersion, created_at := CreatedAt,
+               sha256 := Digest, manifest_path := Path,
+               source_server := Source}) ->
+    is_binary(Id) andalso byte_size(Id) > 0 andalso
+        is_integer(Generation) andalso Generation > 0 andalso
+        is_integer(Index) andalso Index >= 0 andalso
+        is_integer(Term) andalso Term >= 0 andalso
+        is_integer(SchemaVersion) andalso SchemaVersion >= 0 andalso
+        is_integer(CreatedAt) andalso CreatedAt > 0 andalso
+        is_binary(Digest) andalso byte_size(Digest) =:= 32 andalso
+        is_list(Path) andalso Path =/= [] andalso valid_server_id(Source);
+valid_backup(_) -> false.
+
+finish_database_restore(DatabaseId, OperationId, Generation, State) ->
+    Databases = maps:get(databases, State, #{}),
+    case maps:get(DatabaseId, Databases, undefined) of
+        Existing = #{state := restoring, operation_id := OperationId,
+                     generation := Generation} ->
+            Ready0 = maps:remove(restore, Existing#{state => ready}),
+            put_database(Ready0#{last_restore =>
+                                  #{operation_id => OperationId,
+                                    generation => Generation}}, State);
+        #{state := ready, generation := Generation,
+          last_restore := #{operation_id := OperationId}} -> {State, ok};
+        undefined -> {State, {error, database_not_found}};
+        Existing -> {State, fence_error(Existing, Generation)}
+    end.
 
 prepare_database_move(DatabaseId, OperationId, Generation, Source, Replacement,
                       State) ->
@@ -481,5 +598,5 @@ recoverable(State) ->
     Databases = maps:get(databases, State, #{}),
     lists:sort([Database || Database <- maps:values(Databases),
                             lists:member(maps:get(state, Database),
-                                         [creating, deleting]) orelse
+                                         [creating, deleting, restoring]) orelse
                             maps:is_key(movement, Database)]).

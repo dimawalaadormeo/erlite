@@ -44,6 +44,15 @@ repair or movement, and creates a deterministic bounded migration queue. Each
 queued item uses the Phase 7 movement workflow, and every later scan replans
 from committed catalog state. The decision is recorded in ADR 0003.
 
+Phase 10 adds verified backup, portable export, and two fenced restore modes.
+Backup reuses the serialized SQLite snapshot boundary after a quorum barrier
+and records identity, generation, index/term, schema/runtime versions, creation
+time, and checksum. Replace and clone persist `restoring` before rebuilding a
+new generation-specific three-member group. Offline materialization preserves
+application data but resets Erlite's applied-index and transaction ledger, so a
+source SQLite image is never attached to a different Raft history. The decision
+is recorded in ADR 0004.
+
 Phase 6 adds the supervised `erlite_api_server`, a TLS-only HTTP/1.1 JSON boundary. It authenticates configured bearer credentials using constant-time comparison and passes token-free identities to `erlite_api_handler`. Admin identities may invoke lifecycle controls; service identities are limited to their database allow-list. Each data request consistently resolves the catalog record and idempotently attaches a local controller to the already-running Ra group when necessary. Queries pass a read-only policy and execute with SQLite `query_only` enforcement; replicated transactions pass the existing deterministic command validator. Header, body, socket, and operation timeouts are bounded. Malformed transport input is rejected with a JSON `400` response before dispatch.
 
 A cold database closes its SQLite owners but keeps its Ra membership and durable files. Its next read or write reopens every owner, verifies the group's runtime identity, catches the serving replica up through a quorum barrier, and only then serves the operation. Database status reports lifecycle mode, open-owner count, replica file bytes, and sampled controller, SQLite-owner, and Ra-server process memory.

@@ -1,7 +1,8 @@
 -module(erlite_raft_snapshot).
 
--export([create/7, verify/4, install/4, transfer/3, export_bundle/1,
-         receive_bundle/3]).
+-export([create/7, verify/4, verify_backup/1, install/4, restore_as/3,
+         transfer/3, export_bundle/1, receive_bundle/3,
+         write_export/2, write_export_bundle/4, read_export/1]).
 
 -define(FORMAT_VERSION, 2).
 
@@ -44,6 +45,7 @@ finish_image(Image, ManifestPath, DatabaseId, Generation, Index, Term,
                          raft_index => Index,
                          raft_term => Term,
                          schema_version => SchemaVersion,
+                         created_at => erlang:system_time(millisecond),
                          runtime_identity => RuntimeIdentity,
                          image => filename:basename(Image),
                          sha256 => Digest},
@@ -58,11 +60,16 @@ verify(ManifestPath, DatabaseId, Generation, MinimumIndex) ->
         {ok, Manifest = #{format_version := ?FORMAT_VERSION,
                           database_id := DatabaseId,
                           generation := Generation,
-                          raft_index := Index,
+                          raft_index := Index, raft_term := Term,
+                          schema_version := SchemaVersion,
+                          created_at := CreatedAt,
                           runtime_identity := RuntimeIdentity,
                           image := ImageName,
                           sha256 := Expected}}
-          when is_integer(Index), Index >= MinimumIndex, is_list(ImageName),
+          when is_integer(Index), Index >= MinimumIndex,
+               is_integer(Term), Term >= 0,
+               is_integer(SchemaVersion), SchemaVersion >= 0,
+               is_integer(CreatedAt), CreatedAt > 0, is_list(ImageName),
                ImageName =/= [] ->
             case filename:basename(ImageName) =:= ImageName of
                 true ->
@@ -78,6 +85,125 @@ verify(ManifestPath, DatabaseId, Generation, MinimumIndex) ->
             end;
         {ok, _} -> {error, incompatible_snapshot};
         Error -> Error
+    end.
+
+-spec verify_backup(file:filename_all()) ->
+    {ok, map(), file:filename()} | {error, term()}.
+verify_backup(ManifestPath) ->
+    case read_manifest(ManifestPath) of
+        {ok, #{database_id := DatabaseId, generation := Generation}} ->
+            verify(ManifestPath, DatabaseId, Generation, 0);
+        {ok, _} -> {error, incompatible_snapshot};
+        Error -> Error
+    end.
+
+%% Materialize an already verified backup as an offline database with a fresh
+%% Raft history.  The caller must not have a running owner for TargetDatabaseId.
+-spec restore_as(file:filename_all(), binary(), file:filename_all()) ->
+    ok | {error, term()}.
+restore_as(StorageRoot, TargetDatabaseId, ManifestPath) ->
+    case verify_backup(ManifestPath) of
+        {ok, _Manifest, Image} ->
+            case erlite_sqlite_database:path(StorageRoot, TargetDatabaseId) of
+                {ok, Destination} -> restore_verified_as(Image, Destination);
+                Error -> Error
+            end;
+        Error -> Error
+    end.
+
+restore_verified_as(Image, Destination) ->
+    Temporary = Destination ++ ".restore-" ++
+        integer_to_list(erlang:unique_integer([positive])),
+    case filelib:ensure_dir(Destination) of
+        ok ->
+            case file:copy(Image, Temporary) of
+                {ok, _} -> reset_and_activate(Temporary, Destination);
+                {error, Reason} -> {error, {snapshot_copy_failed, Reason}}
+            end;
+        {error, Reason} -> {error, {snapshot_destination, Reason}}
+    end.
+
+reset_and_activate(Temporary, Destination) ->
+    Result = case erlite_sqlite:open(Temporary) of
+                 {ok, Connection} ->
+                     Reset = erlite_sqlite_schema:reset_raft_history(Connection),
+                     _ = erlite_sqlite:close(Connection),
+                     Reset;
+                 {error, Reason} -> {error, {snapshot_open_failed, Reason}}
+             end,
+    case Result of
+        ok ->
+            ok = file:change_mode(Temporary, 8#600),
+            case sync_file(Temporary) of
+                ok ->
+                    case activate(Temporary, Destination, 0) of
+                        {ok, 0} -> ok;
+                        Error -> Error
+                    end;
+                Error -> _ = file:delete(Temporary), Error
+            end;
+        Error -> _ = file:delete(Temporary), Error
+    end.
+
+-spec write_export(file:filename_all(), file:filename_all()) ->
+    ok | {error, term()}.
+write_export(ManifestPath, ExportPath) ->
+    case verify_backup(ManifestPath) of
+        {ok, _Verified, _Image} ->
+            write_verified_export(ManifestPath, ExportPath);
+        Error -> Error
+    end.
+
+write_verified_export(ManifestPath, ExportPath) ->
+    case export_bundle(ManifestPath) of
+        {ok, Manifest, ImageName, ImageBinary} ->
+            write_export_bundle(Manifest, ImageName, ImageBinary, ExportPath);
+        Error -> Error
+    end.
+
+write_export_bundle(Manifest = #{image := ImageName, sha256 := Digest},
+                    ImageName, ImageBinary, ExportPath)
+  when is_binary(Digest), is_binary(ImageBinary), is_list(ExportPath) ->
+    case filename:basename(ImageName) =:= ImageName andalso
+         crypto:hash(sha256, ImageBinary) =:= Digest of
+        true -> publish_export(
+                  ExportPath,
+                  term_to_binary({erlite_backup, 1, Manifest, ImageName,
+                                  ImageBinary}, [compressed]));
+        false -> {error, snapshot_checksum_mismatch}
+    end;
+write_export_bundle(_, _, _, _) -> {error, incompatible_snapshot}.
+
+publish_export(ExportPath, Binary) ->
+    case filelib:ensure_dir(ExportPath) of
+        ok ->
+            case durable_replace(ExportPath, Binary) of
+                ok -> sync_directory(filename:dirname(ExportPath));
+                Error -> Error
+            end;
+        {error, Reason} -> {error, {backup_export_directory, Reason}}
+    end.
+
+-spec read_export(file:filename_all()) ->
+    {ok, map(), file:filename(), binary()} | {error, term()}.
+read_export(ExportPath) ->
+    case file:read_file(ExportPath) of
+        {ok, Binary} ->
+            try binary_to_term(Binary, [safe]) of
+                {erlite_backup, 1,
+                 Manifest = #{image := ImageName, sha256 := Digest},
+                 ImageName, ImageBinary}
+                  when is_list(ImageName), is_binary(Digest),
+                       is_binary(ImageBinary) ->
+                    case filename:basename(ImageName) =:= ImageName andalso
+                         crypto:hash(sha256, ImageBinary) =:= Digest of
+                        true -> {ok, Manifest, ImageName, ImageBinary};
+                        false -> {error, backup_export_checksum_mismatch}
+                    end;
+                _ -> {error, incompatible_backup_export}
+            catch error:badarg -> {error, invalid_backup_export}
+            end;
+        {error, Reason} -> {error, {backup_export_read_failed, Reason}}
     end.
 
 verify_image(Image, Index, RuntimeIdentity, Manifest) ->

@@ -301,9 +301,8 @@ certificates and should be configured with the deployment's trusted CA.
 
 ## Current project boundary
 
-Phases 0 through 9 are complete. Explicit movement, automatic replica repair,
-and bounded automatic rebalancing use the same durable membership workflow.
-The current implementation does not yet provide backup/restore or fleet
-migrations. See
+Phases 0 through 10 are complete. Explicit movement, automatic replica repair,
+bounded automatic rebalancing, and fenced backup/restore are implemented.
+The current implementation does not yet provide fleet migrations. See
 `ERLITE_PROJECT.md` for the roadmap and
 `docs/correctness.md` for implemented guarantees.

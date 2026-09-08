@@ -1,7 +1,8 @@
 -module(erlite_database_lifecycle).
 -behaviour(gen_server).
 
--export([start_link/0, configure/2, create/1, delete/1, move/3, reconcile/0]).
+-export([start_link/0, configure/2, create/1, delete/1, move/3, reconcile/0,
+         backup/1, export/2, restore/2, clone/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
 -define(TIMEOUT, 15000).
@@ -18,6 +19,13 @@ delete(DatabaseId) -> gen_server:call(?MODULE, {delete, DatabaseId}, infinity).
 move(DatabaseId, Source, TargetNode) ->
     gen_server:call(?MODULE, {move, DatabaseId, Source, TargetNode}, infinity).
 reconcile() -> gen_server:call(?MODULE, reconcile, infinity).
+backup(DatabaseId) -> gen_server:call(?MODULE, {backup, DatabaseId}, infinity).
+export(Backup, ExportPath) ->
+    gen_server:call(?MODULE, {export, Backup, ExportPath}, infinity).
+restore(DatabaseId, Backup) ->
+    gen_server:call(?MODULE, {restore, DatabaseId, Backup, replace}, infinity).
+clone(DatabaseId, Backup) ->
+    gen_server:call(?MODULE, {restore, DatabaseId, Backup, clone}, infinity).
 
 init([]) ->
     case {application:get_env(erlite_core, catalog_server),
@@ -43,6 +51,12 @@ handle_call({delete, DatabaseId}, _From, State) ->
     {reply, delete_database(DatabaseId, State), State};
 handle_call({move, DatabaseId, Source, TargetNode}, _From, State) ->
     {reply, move_database(DatabaseId, Source, TargetNode, State), State};
+handle_call({backup, DatabaseId}, _From, State) ->
+    {reply, backup_database(DatabaseId, State), State};
+handle_call({export, Backup, ExportPath}, _From, State) ->
+    {reply, export_backup(Backup, ExportPath), State};
+handle_call({restore, DatabaseId, Backup, Mode}, _From, State) ->
+    {reply, restore_database(DatabaseId, Backup, Mode, State), State};
 handle_call(reconcile, _From, State) ->
     {reply, reconcile_all(State), State};
 handle_call(_Request, _From, State) ->
@@ -148,6 +162,101 @@ move_database(_DatabaseId, _Source, _TargetNode, #{catalog_server := _}) ->
 move_database(_DatabaseId, _Source, _TargetNode, _State) ->
     {error, lifecycle_not_configured}.
 
+backup_database(DatabaseId, #{catalog_server := Catalog,
+                              storage_root := StorageRoot}) ->
+    case erlite_catalog:database(Catalog, DatabaseId, ?TIMEOUT, consistent) of
+        {ok, #{state := ready, generation := Generation}} ->
+            BackupRoot = filename:join(StorageRoot, "backups"),
+            case erlite_databases:backup(DatabaseId, Generation, BackupRoot) of
+                {ok, Source, ManifestPath, Manifest} ->
+                    {ok, Manifest#{source_server => Source,
+                                   manifest_path => ManifestPath}};
+                Error -> Error
+            end;
+        {ok, #{state := Lifecycle}} ->
+            {error, {database_not_ready, Lifecycle}};
+        Error -> Error
+    end;
+backup_database(_DatabaseId, _State) -> {error, lifecycle_not_configured}.
+
+export_backup(#{source_server := Source, manifest_path := ManifestPath},
+              ExportPath) when is_list(ExportPath) ->
+    case member_call(Source, erlite_raft_snapshot, verify_backup,
+                     [ManifestPath]) of
+        {ok, _Manifest, _Image} ->
+            case member_call(Source, erlite_raft_snapshot, export_bundle,
+                             [ManifestPath]) of
+                {ok, Manifest, ImageName, ImageBinary} ->
+                    erlite_raft_snapshot:write_export_bundle(
+                      Manifest, ImageName, ImageBinary, ExportPath);
+                Error -> Error
+            end;
+        Error -> Error
+    end;
+export_backup(_, _) -> {error, invalid_backup}.
+
+restore_database(DatabaseId, Backup, Mode,
+                 State = #{catalog_server := Catalog})
+  when is_binary(DatabaseId), (Mode =:= replace orelse Mode =:= clone) ->
+    case verify_backup_descriptor(Backup) of
+        ok -> begin_restore(DatabaseId, Backup, Mode, Catalog, State);
+        Error -> Error
+    end;
+restore_database(_, _, _, _) -> {error, invalid_database_restore}.
+
+verify_backup_descriptor(#{source_server := {Name, Node} = Source,
+                           manifest_path := ManifestPath} = Backup)
+  when is_atom(Name), is_atom(Node), is_list(ManifestPath),
+       ManifestPath =/= [] ->
+    case member_call(Source, erlite_raft_snapshot, verify_backup,
+                     [ManifestPath]) of
+        {ok, Manifest, _} ->
+            Required = [database_id, generation, raft_index, raft_term,
+                        schema_version, created_at, sha256],
+            case lists:all(fun(K) -> maps:get(K, Backup, undefined) =:=
+                                     maps:get(K, Manifest, undefined)
+                           end, Required) of
+                true -> ok;
+                false -> {error, backup_descriptor_mismatch}
+            end;
+        Error -> Error
+    end;
+verify_backup_descriptor(_) -> {error, invalid_backup}.
+
+begin_restore(DatabaseId, Backup, Mode, Catalog, State) ->
+    case erlite_catalog:database(Catalog, DatabaseId, ?TIMEOUT, consistent) of
+        {ok, Database = #{state := restoring}} -> reconcile_one(Database, State);
+        {ok, #{state := ready, generation := Generation}} when Mode =:= replace ->
+            prepare_restore(DatabaseId, Backup, Mode, Generation,
+                            Generation + 1, Catalog, State);
+        {error, database_not_found} when Mode =:= clone ->
+            prepare_restore(DatabaseId, Backup, Mode, 0, 1, Catalog, State);
+        {ok, _} when Mode =:= clone -> {error, database_exists};
+        {error, database_not_found} -> {error, database_not_found};
+        {ok, #{state := Lifecycle}} ->
+            {error, {database_not_ready, Lifecycle}};
+        Error -> Error
+    end.
+
+prepare_restore(DatabaseId, Backup, Mode, Expected, NewGeneration, Catalog,
+                State) ->
+    OperationId = crypto:strong_rand_bytes(16),
+    case choose_replicas(DatabaseId, NewGeneration, Catalog) of
+        {ok, Replicas} ->
+            case erlite_catalog:prepare_database_restore(
+                   Catalog, DatabaseId, OperationId, Expected, NewGeneration,
+                   Replicas, Backup, Mode, ?TIMEOUT) of
+                ok ->
+                    case erlite_catalog:database(
+                           Catalog, DatabaseId, ?TIMEOUT, consistent) of
+                        {ok, Database} -> reconcile_one(Database, State);
+                        Error -> Error
+                    end;
+                Error -> Error
+            end;
+        Error -> Error
+    end.
+
 reconcile_all(State = #{catalog_server := Catalog}) ->
     case erlite_catalog:recoverable_databases(Catalog, ?TIMEOUT, consistent) of
         {ok, Databases} -> reconcile_list(Databases, State, []);
@@ -176,6 +285,25 @@ reconcile_one(#{database_id := DatabaseId, operation_id := OperationId,
     case erlite_databases:ensure(DatabaseId, Options) of
         {ok, _Pid} -> erlite_catalog:mark_database_ready(
                         Catalog, DatabaseId, OperationId, Generation, ?TIMEOUT);
+        Error -> Error
+    end;
+reconcile_one(#{database_id := DatabaseId, operation_id := OperationId,
+                generation := Generation, replicas := Replicas,
+                state := restoring, restore := Restore},
+              #{catalog_server := Catalog, storage_root := StorageRoot}) ->
+    case erlite_databases:placement(DatabaseId) of
+        {ok, #{server_ids := Replicas}} ->
+            erlite_catalog:finish_database_restore(
+              Catalog, DatabaseId, OperationId, Generation, ?TIMEOUT);
+        {ok, _OldPlacement} ->
+            case retire_previous_restore(DatabaseId, StorageRoot, Restore) of
+                ok -> perform_restore(DatabaseId, OperationId, Generation,
+                                      Replicas, Restore, Catalog, StorageRoot);
+                Error -> Error
+            end;
+        {error, database_not_found} ->
+            perform_restore(DatabaseId, OperationId, Generation, Replicas,
+                            Restore, Catalog, StorageRoot);
         Error -> Error
     end;
 reconcile_one(#{database_id := DatabaseId, operation_id := OperationId,
@@ -239,6 +367,39 @@ reconcile_one(#{database_id := DatabaseId,
                 Error -> Error
             end;
         Error -> Error
+    end.
+
+retire_previous_restore(DatabaseId, StorageRoot,
+                        #{mode := replace, previous_replicas := Replicas}) ->
+    erlite_databases:delete_recorded(
+      DatabaseId, #{storage_root => StorageRoot, server_ids => Replicas});
+retire_previous_restore(_DatabaseId, _StorageRoot, #{mode := clone}) -> ok.
+
+perform_restore(DatabaseId, OperationId, Generation, Replicas, Restore,
+                Catalog, StorageRoot) ->
+    Backup = maps:get(backup, Restore),
+    Source = maps:get(source_server, Backup),
+    ManifestPath = maps:get(manifest_path, Backup),
+    case erlite_database:restore_resources(DatabaseId, StorageRoot, Replicas,
+                                           Source, ManifestPath) of
+        ok ->
+            Options = #{storage_root => StorageRoot, server_ids => Replicas,
+                        ensure_existing => true},
+            case erlite_databases:ensure(DatabaseId, Options) of
+                {ok, _} -> erlite_catalog:finish_database_restore(
+                             Catalog, DatabaseId, OperationId, Generation,
+                             ?TIMEOUT);
+                Error -> Error
+            end;
+        Error -> Error
+    end.
+
+member_call({_, Node}, Module, Function, Arguments) when Node =:= node() ->
+    erlang:apply(Module, Function, Arguments);
+member_call({_, Node}, Module, Function, Arguments) ->
+    case rpc:call(Node, Module, Function, Arguments, ?TIMEOUT) of
+        {badrpc, Reason} -> {error, {backup_rpc_failed, Node, Reason}};
+        Result -> Result
     end.
 
 ensure_movement_controller(DatabaseId, Replicas,

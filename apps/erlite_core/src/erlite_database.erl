@@ -1,7 +1,8 @@
 -module(erlite_database).
 -behaviour(gen_server).
 
--export([start_link/2, delete_resources/2, cleanup_stale_replica/3]).
+-export([start_link/2, delete_resources/2, cleanup_stale_replica/3,
+         restore_resources/5]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(RPC_TIMEOUT, 15000).
@@ -29,6 +30,32 @@ cleanup_stale_replica(DatabaseId, StorageRoot, ServerId) ->
                      [Root, DatabaseId]) of
         ok -> ok;
         {error, database_not_found} -> ok;
+        Error -> Error
+    end.
+
+restore_resources(DatabaseId, StorageRoot, ServerIds, Source, ManifestPath) ->
+    case member_call(Source, erlite_raft_snapshot, export_bundle,
+                     [ManifestPath]) of
+        {ok, Manifest, ImageName, ImageBinary} ->
+            Roots = replica_roots(StorageRoot, ServerIds),
+            restore_resource_list(DatabaseId, maps:to_list(Roots), Manifest,
+                                  ImageName, ImageBinary);
+        Error -> Error
+    end.
+
+restore_resource_list(_DatabaseId, [], _Manifest, _ImageName, _ImageBinary) ->
+    ok;
+restore_resource_list(DatabaseId, [{ServerId, Root} | Rest], Manifest,
+                      ImageName, ImageBinary) ->
+    case member_call(ServerId, erlite_raft_snapshot, receive_bundle,
+                     [Manifest, ImageName, ImageBinary]) of
+        {ok, ReceivedManifest} ->
+            case member_call(ServerId, erlite_raft_snapshot, restore_as,
+                             [Root, DatabaseId, ReceivedManifest]) of
+                ok -> restore_resource_list(DatabaseId, Rest, Manifest,
+                                            ImageName, ImageBinary);
+                Error -> Error
+            end;
         Error -> Error
     end.
 
@@ -158,6 +185,9 @@ handle_call({query, Sql, Params, Timeout}, _From, State0) ->
               {erlite_raft_database:consistent_read(
                  ServerIds, Sql, Params, Replicas, Timeout), State}
       end);
+handle_call({backup, Generation, BackupRoot}, _From, State0) ->
+    with_active(State0,
+      fun(State) -> {create_backup(Generation, BackupRoot, State), State} end);
 handle_call({add_replacement, Source, Replacement, Generation, Timeout},
             _From, State0) ->
     case activate(State0) of
@@ -357,6 +387,56 @@ add_and_catch_up(ServerIds, Replacement, Owner, Timeout) ->
     end.
 
 ok_result(Owner) -> {ok, Owner}.
+
+create_backup(Generation, BackupRoot,
+              #{database_id := DatabaseId, server_ids := ServerIds,
+                replicas := Replicas, timeout := Timeout}) ->
+    case erlite_raft_cluster:barrier(ServerIds, Timeout) of
+        {ok, Barrier, Leader} ->
+            case bootstrap_replica(Leader, Replicas) of
+                {ok, Source, Owner} ->
+                    case erlite_raft_applier:catch_up(Source, Owner, Barrier,
+                                                     Timeout) of
+                        {ok, _} ->
+                            Index = maps:get(command_index, Barrier),
+                            Term = maps:get(command_term, Barrier),
+                            case member_call(
+                                   Source, erlite_raft_snapshot, create,
+                                   [Owner, BackupRoot, DatabaseId, Generation,
+                                    Index, Term, 0]) of
+                                {ok, ManifestPath} ->
+                                    case member_call(
+                                           Source, erlite_raft_snapshot,
+                                           verify,
+                                           [ManifestPath, DatabaseId,
+                                            Generation, Index]) of
+                                        {ok, Manifest, _} ->
+                                            {ok, Source, ManifestPath, Manifest};
+                                        Error -> Error
+                                    end;
+                                {error, snapshot_exists} ->
+                                    ManifestPath = filename:join(
+                                      BackupRoot,
+                                      snapshot_manifest_name(DatabaseId,
+                                                             Generation,
+                                                             Index)),
+                                    case member_call(
+                                           Source, erlite_raft_snapshot,
+                                           verify,
+                                           [ManifestPath, DatabaseId,
+                                            Generation, Index]) of
+                                        {ok, Manifest, _} ->
+                                            {ok, Source, ManifestPath, Manifest};
+                                        Error -> Error
+                                    end;
+                                Error -> Error
+                            end;
+                        Error -> Error
+                    end;
+                error -> {error, no_backup_replica_available}
+            end;
+        Error -> Error
+    end.
 
 ensure_member(ServerIds, Replacement, Timeout) ->
     case ra:members(ServerIds, Timeout) of
