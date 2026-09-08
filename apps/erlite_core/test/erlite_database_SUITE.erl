@@ -3,10 +3,12 @@
 -export([all/0, init_per_suite/1, end_per_suite/1,
          multiple_database_lifecycle_and_isolation/1,
          catalog_lifecycle_reconciles_interrupted_work/1,
+         fleet_migration_canary_batch_and_history/1,
          external_api_query_transaction_and_control/1]).
 
 all() -> [multiple_database_lifecycle_and_isolation,
           catalog_lifecycle_reconciles_interrupted_work,
+          fleet_migration_canary_batch_and_history,
           external_api_query_transaction_and_control].
 
 init_per_suite(Config) ->
@@ -26,6 +28,7 @@ init_per_suite(Config) ->
                                  <<"phase5-lifecycle-test">>, CatalogNodes),
     Catalog = hd(CatalogServers),
     ok = erlite_database_lifecycle:configure(Catalog, Root),
+    ok = erlite_fleet_migrations:configure(Catalog),
     [{root, Root}, {supervisor, Sup}, {catalog, Catalog},
      {catalog_servers, CatalogServers} | Config].
 
@@ -39,6 +42,43 @@ end_per_suite(Config) ->
     _ = application:stop(erlite_raft),
     _ = application:stop(ra),
     cleanup(proplists:get_value(root, Config)),
+    ok.
+
+fleet_migration_canary_batch_and_history(Config) ->
+    Catalog = proplists:get_value(catalog, Config),
+    Db1 = <<"phase11-canary">>,
+    Db2 = <<"phase11-batch">>,
+    ok = erlite_database_lifecycle:create(Db1),
+    ok = erlite_database_lifecycle:create(Db2),
+    Migrations = [#{id => <<"create-orders">>, from => 0, to => 1,
+                    statements =>
+                        [{<<"CREATE TABLE orders (id INTEGER PRIMARY KEY, value TEXT)">>,
+                          []}]},
+                  #{id => <<"orders-value-index">>, from => 1, to => 2,
+                    statements =>
+                        [{<<"CREATE INDEX orders_value_idx ON orders(value)">>, []}]}],
+    Options = #{databases => [Db1, Db2], canary_size => 1,
+                batch_size => 1, max_retries => 2,
+                idempotency_key => <<"phase11-suite">>},
+    {ok, Campaign} = erlite_fleet_migrations:start(
+                       <<"sales">>, Migrations, Options),
+    {ok, Campaign} = erlite_fleet_migrations:start(
+                       <<"sales">>, Migrations, Options),
+    {ok, [{Db2, ok}]} = erlite_fleet_migrations:run_batch(Campaign),
+    {ok, #{status := running}} = erlite_fleet_migrations:status(Campaign),
+    {ok, [{Db1, ok}]} = erlite_fleet_migrations:run_batch(Campaign),
+    {ok, #{status := complete}} = erlite_fleet_migrations:status(Campaign),
+    {ok, #{schema_version := 2}} = erlite_catalog:database(
+                                      Catalog, Db1, 15000, consistent),
+    {ok, #{rows := History}} = erlite_databases:migration_history(Db1),
+    2 = length(History),
+    {ok, #{rows := [[<<"orders">>]]}} = erlite_databases:query(
+                                           Db1,
+                                           <<"SELECT name FROM sqlite_schema "
+                                             "WHERE type='table' AND name='orders'">>,
+                                           [], 15000),
+    ok = erlite_database_lifecycle:delete(Db1),
+    ok = erlite_database_lifecycle:delete(Db2),
     ok.
 
 catalog_lifecycle_reconciles_interrupted_work(Config) ->
@@ -181,7 +221,7 @@ multiple_database_lifecycle_and_isolation(Config) ->
     {ok, ColdStatus} = erlite_databases:status(Db1),
     cold = maps:get(mode, ColdStatus),
     0 = maps:get(open_sqlite_replicas, ColdStatus),
-    {ok, #{rows := [[2]]}} = erlite_databases:query(
+    {ok, #{rows := [[3]]}} = erlite_databases:query(
                                 Db1,
                                 <<"SELECT count(*) FROM sqlite_schema "
                                   "WHERE name LIKE '__erlite_%'">>,

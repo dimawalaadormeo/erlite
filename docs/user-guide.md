@@ -301,8 +301,27 @@ certificates and should be configured with the deployment's trusted CA.
 
 ## Current project boundary
 
-Phases 0 through 10 are complete. Explicit movement, automatic replica repair,
-bounded automatic rebalancing, and fenced backup/restore are implemented.
-The current implementation does not yet provide fleet migrations. See
+Phases 0 through 11 are complete. Explicit movement, automatic replica repair,
+bounded automatic rebalancing, fenced backup/restore, and fleet migrations are
+implemented.
+
+```erlang
+Migrations = [#{id => <<"create-orders">>, from => 0, to => 1,
+                statements =>
+                    [{<<"CREATE TABLE orders (id INTEGER PRIMARY KEY)">>, []}]}],
+{ok, CampaignId} = erlite_fleet_migrations:start(
+    <<"sales-app">>, Migrations,
+    #{databases => DatabaseIds, canary_size => 1,
+      batch_size => 25, max_retries => 3,
+      idempotency_key => <<"sales-v1-rollout">>}),
+{ok, _} = erlite_fleet_migrations:run_batch(CampaignId),
+{ok, Report} = erlite_fleet_migrations:status(CampaignId).
+```
+
+`pause/1` and `resume/1` persist rollout control. Each `run_batch/1` executes
+the canary cohort or one bounded batch; canary errors pause the campaign. The
+idempotency key is required and must be reused when retrying campaign creation.
+same format represents application, optional module, or explicitly scoped
+database migrations. See
 `ERLITE_PROJECT.md` for the roadmap and
 `docs/correctness.md` for implemented guarantees.

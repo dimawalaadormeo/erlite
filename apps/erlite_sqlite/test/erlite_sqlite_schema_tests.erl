@@ -143,6 +143,55 @@ reset_raft_history_preserves_user_data_and_clears_source_ledger_test() ->
               Connection
       end).
 
+migration_is_atomic_versioned_and_idempotent_test() ->
+    with_database(
+      fun(_Path, Connection) ->
+          ok = erlite_sqlite_schema:initialize(Connection),
+          Hash = hash(<<"migration-one">>),
+          Statements = [{execute,
+                         <<"CREATE TABLE migrated (id INTEGER PRIMARY KEY)">>,
+                         []}],
+          ?assertEqual({ok, applied}, erlite_sqlite_schema:apply_migration(
+                         Connection, 0, 1, <<"app">>, <<"one">>, Hash,
+                         0, 1, Statements)),
+          ?assertEqual({ok, 1}, erlite_sqlite_schema:schema_version(Connection)),
+          ?assertEqual({ok, already_applied},
+                       erlite_sqlite_schema:apply_migration(
+                         Connection, 1, 2, <<"app">>, <<"one">>, Hash,
+                         0, 1, Statements)),
+          ?assertEqual({error, {schema_version_mismatch, 0, 1}},
+                       erlite_sqlite_schema:apply_committed(
+                         Connection, 2, 3, <<"old-client">>, hash(<<"tx">>),
+                         0, [{execute, <<"INSERT INTO migrated VALUES (?)">>,
+                              [1]}])),
+          ?assertMatch({ok, #{rows := [[<<"app">>, <<"one">>, 0, 1, 1]]}},
+                       erlite_sqlite_schema:migration_history(Connection)),
+          Connection
+      end).
+
+unsafe_migration_is_rejected_before_sqlite_state_changes_test() ->
+    with_database(
+      fun(_Path, Connection) ->
+          ok = erlite_sqlite_schema:initialize(Connection),
+          Unsafe = [{execute,
+                     <<"CREATE TABLE poisoned (x TEXT DEFAULT(RANDOM()))">>,
+                     []}],
+          ?assertEqual({error, unsafe_migration_sql},
+                       erlite_sqlite_schema:apply_migration(
+                         Connection, 0, 1, <<"app">>, <<"poison">>,
+                         hash(<<"poison">>), 0, 1, Unsafe)),
+          ?assertEqual({ok, 0}, erlite_sqlite_schema:last_applied_index(Connection)),
+          ?assertEqual({ok, 0}, erlite_sqlite_schema:schema_version(Connection)),
+          ?assertMatch({ok, #{rows := []}},
+                       erlite_sqlite_schema:migration_history(Connection)),
+          ?assertMatch({ok, #{rows := []}},
+                       erlite_sqlite:query(
+                         Connection,
+                         <<"SELECT name FROM sqlite_schema WHERE name='poisoned'">>,
+                         [])),
+          Connection
+      end).
+
 apply(Connection, Expected, Index, TransactionId, Command, Statements) ->
     erlite_sqlite_schema:apply_committed(
       Connection, Expected, Index, TransactionId, hash(Command), Statements).

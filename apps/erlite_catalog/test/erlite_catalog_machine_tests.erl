@@ -286,6 +286,105 @@ replace_restore_rejects_a_different_database_backup_test() ->
     {ok, #{state := ready, generation := 1, replicas := Replicas}} =
         erlite_catalog_machine:database(DatabaseId, State).
 
+migration_campaign_is_durable_pauseable_and_reported_test() ->
+    CampaignId = <<31:128>>,
+    Campaign = #{campaign_id => CampaignId, migration_set => <<"app">>,
+                 idempotency_key => <<"deploy-app-v1">>,
+                 databases => [<<"a">>, <<"b">>],
+                 migrations => [#{id => <<"one">>, from => 0, to => 1,
+                                  statements => [{<<"CREATE TABLE x (id INTEGER)">>, []}]}],
+                 canary_size => 1, batch_size => 10, max_retries => 1},
+    State0 = catalog_state(),
+    {State1, ok} = erlite_catalog_machine:apply(
+                     #{index => 1}, {create_migration_campaign, Campaign}, State0),
+    {State1, ok} = erlite_catalog_machine:apply(
+                     #{index => 2}, {create_migration_campaign, Campaign}, State1),
+    {State2, ok} = erlite_catalog_machine:apply(
+                     #{index => 3}, {set_migration_campaign_state,
+                                     CampaignId, paused}, State1),
+    {ok, #{status := paused}} = erlite_catalog_machine:campaign(CampaignId, State2),
+    {State3, ok} = erlite_catalog_machine:apply(
+                     #{index => 4}, {set_migration_campaign_state,
+                                     CampaignId, running}, State2),
+    {State4, ok} = erlite_catalog_machine:apply(
+                     #{index => 4}, {record_migration_result,
+                                     CampaignId, <<"a">>, ok}, State3),
+    {State5, ok} = erlite_catalog_machine:apply(
+                     #{index => 5}, {record_migration_result,
+                                     CampaignId, <<"b">>, ok}, State4),
+    {ok, #{status := complete, entries := Entries}} =
+        erlite_catalog_machine:campaign(CampaignId, State5),
+    complete = maps:get(status, maps:get(<<"a">>, Entries)).
+
+paused_campaign_is_not_resumed_by_inflight_result_test() ->
+    Id = <<32:128>>,
+    Campaign = #{campaign_id => Id, migration_set => <<"app">>,
+                 idempotency_key => <<"pause-race">>, databases => [<<"a">>],
+                 migrations => [#{id => <<"one">>, from => 0, to => 1,
+                                  statements => [{<<"CREATE TABLE x (id INTEGER)">>, []}]}],
+                 canary_size => 1, batch_size => 1, max_retries => 1},
+    {State1, ok} = erlite_catalog_machine:apply(
+                     #{index => 1}, {create_migration_campaign, Campaign},
+                     catalog_state()),
+    {State2, ok} = erlite_catalog_machine:apply(
+                     #{index => 2}, {set_migration_campaign_state, Id, paused},
+                     State1),
+    {State3, ok} = erlite_catalog_machine:apply(
+                     #{index => 3}, {record_migration_result, Id, <<"a">>, ok},
+                     State2),
+    {ok, #{status := paused}} = erlite_catalog_machine:campaign(Id, State3),
+    {State4, ok} = erlite_catalog_machine:apply(
+                     #{index => 4}, {set_migration_campaign_state, Id, running},
+                     State3),
+    {ok, #{status := complete}} = erlite_catalog_machine:campaign(Id, State4).
+
+schema_advance_is_fenced_by_other_database_operations_test() ->
+    Id = <<"migration-fence">>,
+    State0 = ready_database(Id, <<33:128>>, database_replicas(one)),
+    #{databases := Databases} = State0,
+    Database = maps:get(Id, Databases),
+    MoveOp = <<34:128>>,
+    Moving = State0#{databases => Databases#{Id =>
+                  Database#{movement => #{operation_id => MoveOp}}}},
+    {Moving, {error, {movement_in_progress, MoveOp}}} =
+        erlite_catalog_machine:apply(
+          #{index => 3}, {advance_database_schema, Id, 1, 0, 1}, Moving),
+    RepairOp = <<35:128>>,
+    Repairing = State0#{databases => Databases#{Id =>
+                    Database#{repair => #{operation_id => RepairOp}}}},
+    {Repairing, {error, {repair_in_progress, RepairOp}}} =
+        erlite_catalog_machine:apply(
+          #{index => 3}, {advance_database_schema, Id, 1, 0, 1}, Repairing),
+    Restoring = State0#{databases => Databases#{Id =>
+                    Database#{state => restoring}}},
+    {Restoring, {error, {database_not_ready, restoring}}} =
+        erlite_catalog_machine:apply(
+          #{index => 3}, {advance_database_schema, Id, 1, 0, 1}, Restoring).
+
+database_migration_fence_serializes_and_finishes_idempotently_test() ->
+    Id = <<"fenced-migration">>,
+    Campaign = <<36:128>>,
+    Migration = <<"create-table">>,
+    State0 = ready_database(Id, <<37:128>>, database_replicas(one)),
+    Prepare = {prepare_database_migration, Id, Campaign, Migration, 1, 0, 1},
+    {State1, ok} = erlite_catalog_machine:apply(#{index => 3}, Prepare, State0),
+    {State1, ok} = erlite_catalog_machine:apply(#{index => 4}, Prepare, State1),
+    {ok, #{migration := #{campaign_id := Campaign}}} =
+        erlite_catalog_machine:database(Id, State1),
+    [Source | _] = database_replicas(one),
+    Replacement = {migration_replacement, node()},
+    {State1, {error, {migration_in_progress, Campaign}}} =
+        erlite_catalog_machine:apply(
+          #{index => 5},
+          {prepare_database_move, Id, <<38:128>>, 1, Source, Replacement},
+          State1),
+    Finish = {finish_database_migration, Id, Campaign, Migration, 1, 0, 1},
+    {State2, ok} = erlite_catalog_machine:apply(#{index => 6}, Finish, State1),
+    {State2, ok} = erlite_catalog_machine:apply(#{index => 7}, Finish, State2),
+    {ok, Ready} = erlite_catalog_machine:database(Id, State2),
+    1 = maps:get(schema_version, Ready),
+    false = maps:is_key(migration, Ready).
+
 backup_descriptor(DatabaseId) ->
     #{database_id => DatabaseId, generation => 4, raft_index => 99,
       raft_term => 7, schema_version => 3, created_at => 1000,

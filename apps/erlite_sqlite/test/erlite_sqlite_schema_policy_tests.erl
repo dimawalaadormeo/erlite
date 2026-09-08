@@ -26,7 +26,7 @@ unsafe_table_features_are_rejected_test_() ->
               <<"CREATE TABLE unsafe (value TEXT COLLATE NOCASE)">>}],
     [?_test(assert_unsafe_table(Definition, Reason)) || {Reason, Definition} <- Cases].
 
-triggers_views_and_explicit_indexes_are_rejected_test_() ->
+triggers_and_views_are_rejected_but_plain_indexes_are_accepted_test_() ->
     [?_test(with_schema_object(<<"CREATE TRIGGER unsafe AFTER INSERT ON items "
                                 "BEGIN DELETE FROM items WHERE id = NEW.id; END">>,
                                <<"trigger">>, <<"unsafe">>,
@@ -34,8 +34,12 @@ triggers_views_and_explicit_indexes_are_rejected_test_() ->
      ?_test(with_schema_object(<<"CREATE VIEW unsafe AS SELECT id FROM items">>,
                                <<"view">>, <<"unsafe">>,
                                unsupported_object_type)),
-     ?_test(with_schema_object(<<"CREATE INDEX unsafe ON items(id)">>,
-                               <<"index">>, <<"unsafe">>, explicit_index))].
+     ?_test(with_database(
+              fun(Connection) ->
+                  execute(Connection, <<"CREATE TABLE items (id INTEGER)">>),
+                  execute(Connection, <<"CREATE INDEX safe_index ON items(id)">>),
+                  ?assertEqual(ok, erlite_sqlite_schema_policy:validate(Connection))
+              end))].
 
 owner_exposes_serialized_schema_validation_test() ->
     Root = temporary_root(),

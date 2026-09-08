@@ -1,7 +1,9 @@
 -module(erlite_sqlite_schema).
 
--export([initialize/1, last_applied_index/1, transaction_status/3,
-         apply_committed/6, reset_raft_history/1]).
+-export([initialize/1, last_applied_index/1, schema_version/1,
+         migration_history/1, transaction_status/3,
+         apply_committed/6, apply_committed/7, apply_migration/9,
+         reset_raft_history/1]).
 
 -define(FORMAT_VERSION, 1).
 
@@ -15,12 +17,19 @@ initialize(Connection) ->
            "singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
            "format_version INTEGER NOT NULL, "
            "last_applied_raft_index INTEGER NOT NULL CHECK (last_applied_raft_index >= 0)"
+           ", schema_version INTEGER NOT NULL DEFAULT 0 CHECK (schema_version >= 0)"
            ")">>,
          []},
         {execute,
          <<"INSERT OR IGNORE INTO __erlite_replica_metadata "
            "(singleton, format_version, last_applied_raft_index) VALUES (1, ?, 0)">>,
          [?FORMAT_VERSION]},
+        {execute,
+         <<"CREATE TABLE IF NOT EXISTS __erlite_migrations ("
+           "migration_set BLOB NOT NULL, migration_id BLOB NOT NULL, "
+           "from_version INTEGER NOT NULL, to_version INTEGER NOT NULL, "
+           "command_hash BLOB NOT NULL, raft_index INTEGER NOT NULL, "
+           "PRIMARY KEY (migration_set, migration_id))">>, []},
         {execute,
          <<"CREATE TABLE IF NOT EXISTS __erlite_transactions ("
            "transaction_id BLOB PRIMARY KEY, "
@@ -30,9 +39,31 @@ initialize(Connection) ->
          []}
     ],
     case erlite_sqlite:transaction(Connection, Statements) of
-        {ok, _Results} -> verify_format(Connection);
+        {ok, _Results} -> ensure_schema_version_column(Connection);
         {error, _Reason} = Error -> Error
     end.
+
+ensure_schema_version_column(Connection) ->
+    case erlite_sqlite:execute(Connection,
+           <<"ALTER TABLE __erlite_replica_metadata ADD COLUMN "
+             "schema_version INTEGER NOT NULL DEFAULT 0 CHECK (schema_version >= 0)">>, []) of
+        {ok, _} -> verify_format(Connection);
+        {error, _} -> verify_format(Connection)
+    end.
+
+schema_version(Connection) ->
+    case erlite_sqlite:query(Connection,
+           <<"SELECT schema_version FROM __erlite_replica_metadata WHERE singleton = 1">>, []) of
+        {ok, #{rows := [[Version]]}} when is_integer(Version), Version >= 0 ->
+            {ok, Version};
+        {ok, #{rows := Rows}} -> {error, {invalid_schema_version, Rows}};
+        Error -> Error
+    end.
+
+migration_history(Connection) ->
+    erlite_sqlite:query(Connection,
+      <<"SELECT migration_set, migration_id, from_version, to_version, raft_index "
+        "FROM __erlite_migrations ORDER BY to_version">>, []).
 
 -spec last_applied_index(erlite_sqlite:connection()) ->
     {ok, non_neg_integer()} | {error, term()}.
@@ -63,10 +94,20 @@ transaction_status(Connection, TransactionId, CommandHash) ->
     end.
 
 -spec apply_committed(erlite_sqlite:connection(), non_neg_integer(),
-                      pos_integer(), binary(), binary(),
+                      pos_integer(), binary(), binary(), non_neg_integer(),
                       [erlite_sqlite_adapter:statement()]) ->
     {ok, apply_result()} | {error, term()}.
+apply_committed(Connection, ExpectedIndex, RaftIndex, TransactionId,
+                CommandHash, Statements) ->
+    case schema_version(Connection) of
+        {ok, Version} -> apply_committed(Connection, ExpectedIndex, RaftIndex,
+                                         TransactionId, CommandHash, Version,
+                                         Statements);
+        Error -> Error
+    end.
+
 apply_committed(Connection, ExpectedIndex, RaftIndex, TransactionId, CommandHash,
+                SchemaVersion,
                 Statements)
   when is_integer(ExpectedIndex), ExpectedIndex >= 0,
        is_integer(RaftIndex), RaftIndex > ExpectedIndex,
@@ -76,24 +117,106 @@ apply_committed(Connection, ExpectedIndex, RaftIndex, TransactionId, CommandHash
     case validate_write_statements(Statements) of
         ok -> apply_after_expected_index(Connection, ExpectedIndex,
                                          RaftIndex, TransactionId,
-                                         CommandHash, Statements);
+                                         CommandHash, SchemaVersion, Statements);
         {error, _Reason} = Error -> Error
     end;
 apply_committed(_Connection, ExpectedIndex, RaftIndex, _TransactionId,
-                _CommandHash, _Statements) ->
+                _CommandHash, _SchemaVersion, _Statements) ->
     {error, {invalid_raft_index_transition, ExpectedIndex, RaftIndex}}.
 
 apply_after_expected_index(Connection, ExpectedIndex, RaftIndex, TransactionId,
-                           CommandHash, Statements) ->
+                           CommandHash, SchemaVersion, Statements) ->
     case last_applied_index(Connection) of
         {ok, CurrentIndex} when RaftIndex =< CurrentIndex ->
             {ok, already_applied};
         {ok, ExpectedIndex} ->
-            apply_transaction(Connection, RaftIndex, TransactionId,
-                              CommandHash, Statements);
+            case schema_version(Connection) of
+                {ok, SchemaVersion} -> apply_transaction(
+                                         Connection, RaftIndex, TransactionId,
+                                         CommandHash, Statements);
+                {ok, Current} -> {error, {schema_version_mismatch,
+                                          SchemaVersion, Current}};
+                Error -> Error
+            end;
         {ok, CurrentIndex} ->
             {error, {raft_index_mismatch, ExpectedIndex, CurrentIndex, RaftIndex}};
         {error, _Reason} = Error -> Error
+    end.
+
+apply_migration(Connection, ExpectedIndex, RaftIndex, Set, MigrationId,
+                CommandHash, FromVersion, ToVersion, Statements) ->
+    case validate_migration_statements(Statements) of
+        ok -> apply_valid_migration(Connection, ExpectedIndex, RaftIndex, Set,
+                                    MigrationId, CommandHash, FromVersion,
+                                    ToVersion, Statements);
+        Error -> Error
+    end.
+
+apply_valid_migration(Connection, ExpectedIndex, RaftIndex, Set, MigrationId,
+                      CommandHash, FromVersion, ToVersion, Statements) ->
+    case {last_applied_index(Connection), schema_version(Connection)} of
+        {{ok, CurrentIndex}, _} when RaftIndex =< CurrentIndex ->
+            {ok, already_applied};
+        {{ok, ExpectedIndex}, {ok, FromVersion}} when ToVersion =:= FromVersion + 1 ->
+            Record = {execute,
+                      <<"INSERT INTO __erlite_migrations "
+                        "(migration_set,migration_id,from_version,to_version,command_hash,raft_index) "
+                        "VALUES (?,?,?,?,?,?)">>,
+                      [Set, MigrationId, FromVersion, ToVersion, CommandHash,
+                       RaftIndex]},
+            Version = {execute,
+                       <<"UPDATE __erlite_replica_metadata SET schema_version = ? "
+                         "WHERE singleton = 1 AND schema_version = ?">>,
+                       [ToVersion, FromVersion]},
+            commit_with_index(Connection, RaftIndex,
+                              Statements ++ [Record, Version], applied);
+        {{ok, ExpectedIndex}, {ok, ToVersion}} ->
+            case migration_record(Connection, Set, MigrationId) of
+                {ok, CommandHash, FromVersion, ToVersion} ->
+                    commit_with_index(Connection, RaftIndex, [], already_applied);
+                {ok, _Hash, _OldFrom, _OldTo} ->
+                    {error, {migration_id_conflict, Set, MigrationId}};
+                not_found -> {error, {schema_version_mismatch,
+                                      FromVersion, ToVersion}};
+                Error -> Error
+            end;
+        {{ok, ExpectedIndex}, {ok, Current}} ->
+            {error, {schema_version_mismatch, FromVersion, Current}};
+        {{ok, Current}, _} ->
+            {error, {raft_index_mismatch, ExpectedIndex, Current, RaftIndex}};
+        {Error, _} -> Error
+    end.
+
+validate_migration_statements([]) -> {error, empty_migration};
+validate_migration_statements([{execute, Sql, Params} | Rest])
+  when is_binary(Sql), is_list(Params) ->
+    case placeholder_count(Sql) =:= length(Params) of
+        false -> {error, unsafe_migration_sql};
+        true ->
+            case erlite_sqlite_schema_policy:validate_migration_statement(Sql) of
+                ok -> validate_remaining_migration_statements(Rest);
+                Error -> Error
+            end
+    end;
+validate_migration_statements([Statement | _]) ->
+    {error, {invalid_migration_statement, Statement}}.
+
+validate_remaining_migration_statements([]) -> ok;
+validate_remaining_migration_statements(Statements) ->
+    validate_migration_statements(Statements).
+
+placeholder_count(Sql) ->
+    length([C || <<C>> <= Sql, C =:= $?]).
+
+migration_record(Connection, Set, MigrationId) ->
+    case erlite_sqlite:query(Connection,
+           <<"SELECT command_hash, from_version, to_version "
+             "FROM __erlite_migrations WHERE migration_set = ? AND migration_id = ?">>,
+           [Set, MigrationId]) of
+        {ok, #{rows := [[Hash, From, To]]}} -> {ok, Hash, From, To};
+        {ok, #{rows := []}} -> not_found;
+        {ok, #{rows := Rows}} -> {error, {invalid_migration_history, Rows}};
+        Error -> Error
     end.
 
 apply_transaction(Connection, RaftIndex, TransactionId, CommandHash, Statements) ->

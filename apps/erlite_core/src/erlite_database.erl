@@ -179,6 +179,27 @@ handle_call({write, Command, Timeout}, _From, State0) ->
               {erlite_raft_database:write(ServerIds, Command, Replicas, Timeout),
                State}
       end);
+handle_call({migrate, Command, Timeout}, _From, State0) ->
+    with_active(State0,
+      fun(State = #{server_ids := ServerIds, replicas := Replicas}) ->
+              {erlite_raft_database:write(ServerIds, Command, Replicas, Timeout),
+               State}
+      end);
+handle_call(migration_history, _From, State0) ->
+    with_active(State0,
+      fun(State = #{server_ids := ServerIds, replicas := Replicas}) ->
+              case erlite_raft_cluster:barrier(ServerIds, 15000) of
+                  {ok, Barrier, Leader} ->
+                      Owner = maps:get(Leader, Replicas),
+                      case erlite_raft_applier:catch_up(Leader, Owner, Barrier,
+                                                        15000) of
+                          {ok, _} -> {erlite_sqlite_owner:migration_history(Owner),
+                                      State};
+                          Error -> {Error, State}
+                      end;
+                  Error -> {Error, State}
+              end
+      end);
 handle_call({query, Sql, Params, Timeout}, _From, State0) ->
     with_active(State0,
       fun(State = #{server_ids := ServerIds, replicas := Replicas}) ->

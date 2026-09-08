@@ -53,6 +53,13 @@ application data but resets Erlite's applied-index and transaction ledger, so a
 source SQLite image is never attached to a different Raft history. The decision
 is recorded in ADR 0004.
 
+Phase 11 adds `erlite_fleet_migrations`. Named migration packs are ordered
+chains of single-version steps. Each step is a distinct Raft command applied by
+the normal replica applier. Campaign definitions and database attempts are
+replicated in the catalog, so pause/resume, retry budgets, and reporting survive
+controller or catalog-leader changes. A sorted canary cohort completes before
+bounded later batches. The decision is recorded in ADR 0005.
+
 Phase 6 adds the supervised `erlite_api_server`, a TLS-only HTTP/1.1 JSON boundary. It authenticates configured bearer credentials using constant-time comparison and passes token-free identities to `erlite_api_handler`. Admin identities may invoke lifecycle controls; service identities are limited to their database allow-list. Each data request consistently resolves the catalog record and idempotently attaches a local controller to the already-running Ra group when necessary. Queries pass a read-only policy and execute with SQLite `query_only` enforcement; replicated transactions pass the existing deterministic command validator. Header, body, socket, and operation timeouts are bounded. Malformed transport input is rejected with a JSON `400` response before dispatch.
 
 A cold database closes its SQLite owners but keeps its Ra membership and durable files. Its next read or write reopens every owner, verifies the group's runtime identity, catches the serving replica up through a quorum barrier, and only then serves the operation. Database status reports lifecycle mode, open-owner count, replica file bytes, and sampled controller, SQLite-owner, and Ra-server process memory.
