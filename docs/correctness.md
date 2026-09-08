@@ -142,6 +142,21 @@ and SQLite image are deleted before the stale marker is cleared. Cleanup also
 continues after database deletion. These transitions are idempotent and the
 repair and movement fences prevent overlapping membership changes.
 
+## Automatic rebalancing
+
+Rebalancing does not introduce a new membership-change path. The planner
+selects only ready databases with no repair or movement record and only healthy
+active source and target nodes. Every selected migration enters the durable,
+catalog-fenced movement workflow, preserving snapshot verification, replacement
+catch-up, membership ordering, source retirement, and generation advancement.
+
+Planning is catalog-leader-owned and bounded per scan. Projected counts change
+after each selection, and one database cannot appear twice in a queue. On a
+worker crash or leader change, the next scan reconstructs its plan from a
+consistent catalog read. A submitted migration remains durable and resumable;
+catalog operation-ID and generation fences prevent another planner or repair
+worker from overlapping it.
+
 ## External service boundary
 
 Phase 6 never exposes a plaintext listener. Enabling the HTTP service requires TLS certificate material and at least one configured bearer credential. Tokens are compared in constant time and removed from the authenticated identity before dispatch. Admin authorization is required for create, delete, and fleet listing; service identities can access only their explicit database allow-list.

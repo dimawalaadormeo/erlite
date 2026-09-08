@@ -1,6 +1,6 @@
 # Erlite User Guide
 
-This guide covers the functionality implemented through Phase 8. Erlite is
+This guide covers the functionality implemented through Phase 9. Erlite is
 currently a development-stage Erlang/OTP runtime for operating many isolated,
 Raft-replicated SQLite databases.
 
@@ -90,6 +90,22 @@ _build/default/bin/erlite leave
 Move every database replica away from a node before removing that node. Node
 removal changes catalog membership; it does not implicitly relocate database
 replicas.
+
+## Automatic rebalancing
+
+The catalog leader periodically balances ready replicas across healthy active
+nodes. The initial planner uses replica count and migrates only when a move
+reduces a source-to-target difference greater than one. Configure it in the
+`erlite_core` application environment:
+
+```erlang
+{rebalance_scan_interval_ms, 10000},
+{rebalance_max_migrations_per_scan, 1}
+```
+
+The per-scan limit bounds the sequential migration queue. Repair and explicit
+movement take precedence for an affected database, and every automatic move
+uses the same add, catch-up, verify, remove, and generation-fenced workflow.
 
 ## Move a database replica
 
@@ -285,9 +301,9 @@ certificates and should be configured with the deployment's trusted CA.
 
 ## Current project boundary
 
-Phases 0 through 7 are complete. Explicit database movement is available to
-move one recorded source replica to an active target node; automatic repair and
-rebalancing remain later phases. The current implementation does not yet provide
-automatic replica repair, rebalancing, backup/restore, or fleet migrations. See
+Phases 0 through 9 are complete. Explicit movement, automatic replica repair,
+and bounded automatic rebalancing use the same durable membership workflow.
+The current implementation does not yet provide backup/restore or fleet
+migrations. See
 `ERLITE_PROJECT.md` for the roadmap and
 `docs/correctness.md` for implemented guarantees.

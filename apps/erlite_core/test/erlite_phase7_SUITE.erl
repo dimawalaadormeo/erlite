@@ -3,11 +3,13 @@
 -export([all/0, init_per_suite/1, end_per_suite/1,
          expand_three_to_four_and_move/1,
          expand_four_to_six_and_move/1,
+         automatic_rebalancing_uses_safe_movement/1,
          movement_reconciles_membership_crash_points/1,
          movement_reconciles_registry_crash/1]).
 
 all() -> [expand_three_to_four_and_move,
           expand_four_to_six_and_move,
+          automatic_rebalancing_uses_safe_movement,
           movement_reconciles_membership_crash_points,
           movement_reconciles_registry_crash].
 
@@ -99,6 +101,15 @@ expand_four_to_six_and_move(Config) ->
     Peers = proplists:get_value(peers, Config),
     {_, Node5, _} = lists:nth(5, Peers),
     {_, Node6, _} = lists:nth(6, Peers),
+    PreExpansion = [<<"phase9-pre-expansion-1">>,
+                    <<"phase9-pre-expansion-2">>,
+                    <<"phase9-pre-expansion-3">>,
+                    <<"phase9-pre-expansion-4">>],
+    lists:foreach(
+      fun(Id) ->
+              ok = erlite_database_lifecycle:create(Id),
+              ok = seed_and_write(Id)
+      end, PreExpansion),
     ok = join_catalog_node(Catalog, Node5, 5),
     ok = join_catalog_node(Catalog, Node6, 6),
     DatabaseId = <<"phase7-four-to-six">>,
@@ -120,6 +131,37 @@ expand_four_to_six_and_move(Config) ->
                                                     15000, consistent),
     true = lists:any(fun({_, Node}) -> Node =:= Node5 end, Final),
     true = lists:any(fun({_, Node}) -> Node =:= Node6 end, Final),
+    {ok, #{rows := [[<<"preserved">>]]}} = erlite_databases:query(
+                                               DatabaseId,
+                                               <<"SELECT value FROM moved">>,
+                                               [], 15000),
+    ok.
+
+automatic_rebalancing_uses_safe_movement(Config) ->
+    Catalog = proplists:get_value(catalog, Config),
+    {ok, #{nodes := Nodes, databases := Before}} =
+        erlite_catalog:status(Catalog, 15000, consistent),
+    ActiveNodes = lists:sort(
+                    [Node || #{state := active,
+                               server_id := {_, Node}} <- Nodes]),
+    [{DatabaseId, Source, Target}] =
+        erlite_rebalancer:plan(Before, ActiveNodes, 1),
+    {ok, #{generation := Generation}} = erlite_catalog:database(
+                                            Catalog, DatabaseId, 15000,
+                                            consistent),
+    ok = application:set_env(erlite_core,
+                             rebalance_max_migrations_per_scan, 1),
+    {ok, _CatalogMembers, CatalogLeader} = ra:members(Catalog, 15000),
+    ok = erlite_rebalancer:configure(CatalogLeader,
+                                     proplists:get_value(root, Config)),
+    {ok, Database = #{generation := NewGeneration, replicas := Replicas}} =
+        erlite_catalog:database(Catalog, DatabaseId, 15000, consistent),
+    true = NewGeneration =:= Generation + 1,
+    false = maps:is_key(movement, Database),
+    false = lists:member(Source, Replicas),
+    true = lists:any(fun({_, Node}) -> Node =:= Target end, Replicas),
+    {ok, Members, _Leader} = ra:members(Replicas, 15000),
+    true = lists:sort(Replicas) =:= lists:sort(Members),
     {ok, #{rows := [[<<"preserved">>]]}} = erlite_databases:query(
                                                DatabaseId,
                                                <<"SELECT value FROM moved">>,

@@ -8,7 +8,8 @@ supervisor_starts_database_lifecycle_children_test() ->
     Children = supervisor:which_children(Pid),
     ?assertEqual([erlite_api_server, erlite_database_lifecycle,
                   erlite_database_router, erlite_database_sup,
-                  erlite_databases, erlite_replica_repair],
+                  erlite_databases, erlite_rebalancer,
+                  erlite_replica_repair],
                  lists:sort([Id || {Id, _, _, _} <- Children])),
     ok = gen_server:stop(Pid).
 
