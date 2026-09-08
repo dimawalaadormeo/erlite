@@ -2,8 +2,9 @@
 -behaviour(gen_server).
 
 -export([start_link/0, create/2, ensure/2, delete/1, delete_recorded/2,
-         list/0, status/1,
-         write/3, query/4, cool/1, add_replacement/5, remove_source/4]).
+         list/0, status/1, placement/1,
+         write/3, query/4, cool/1, backup/3,
+         add_replacement/5, remove_source/4]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
 -define(ROUTES, erlite_database_routes).
@@ -22,11 +23,14 @@ list() ->
         Error -> Error
     end.
 status(DatabaseId) -> call_database(DatabaseId, status).
+placement(DatabaseId) -> call_database(DatabaseId, registry_metadata).
 write(DatabaseId, Command, Timeout) ->
     call_database(DatabaseId, {write, Command, Timeout}).
 query(DatabaseId, Sql, Params, Timeout) ->
     call_database(DatabaseId, {query, Sql, Params, Timeout}).
 cool(DatabaseId) -> call_database(DatabaseId, cool).
+backup(DatabaseId, Generation, BackupRoot) ->
+    call_database(DatabaseId, {backup, Generation, BackupRoot}).
 add_replacement(DatabaseId, Source, Replacement, Generation, Timeout) ->
     gen_server:call(?MODULE,
                     {add_replacement, DatabaseId, Source, Replacement,

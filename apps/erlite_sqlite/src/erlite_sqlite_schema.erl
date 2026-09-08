@@ -1,7 +1,7 @@
 -module(erlite_sqlite_schema).
 
 -export([initialize/1, last_applied_index/1, transaction_status/3,
-         apply_committed/6]).
+         apply_committed/6, reset_raft_history/1]).
 
 -define(FORMAT_VERSION, 1).
 
@@ -146,4 +146,20 @@ verify_format(Connection) ->
         {ok, #{rows := [[Version]]}} -> {error, {unsupported_format_version, Version}};
         {ok, #{rows := Rows}} -> {error, {invalid_replica_metadata, Rows}};
         {error, _Reason} = Error -> Error
+    end.
+
+%% This is only valid while materializing an offline backup under a new
+%% database generation.  It deliberately preserves user schema and data while
+%% severing every reference to the source Raft history.
+-spec reset_raft_history(erlite_sqlite:connection()) -> ok | {error, term()}.
+reset_raft_history(Connection) ->
+    Statements = [
+        {execute, <<"DELETE FROM __erlite_transactions">>, []},
+        {execute,
+         <<"UPDATE __erlite_replica_metadata "
+           "SET last_applied_raft_index = 0 WHERE singleton = 1">>, []}
+    ],
+    case erlite_sqlite:transaction(Connection, Statements) of
+        {ok, _} -> ok;
+        {error, _} = Error -> Error
     end.

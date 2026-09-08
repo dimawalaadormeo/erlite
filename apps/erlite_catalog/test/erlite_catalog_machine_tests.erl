@@ -239,6 +239,59 @@ transient_under_replication_can_be_cleared_before_repair_test() ->
     {ok, Database} = erlite_catalog_machine:database(DatabaseId, State2),
     false = maps:is_key(repair, Database).
 
+restore_and_clone_are_durable_idempotent_and_generation_fenced_test() ->
+    ReplaceId = <<"replace-target">>,
+    Backup = backup_descriptor(ReplaceId),
+    OldReplicas = database_replicas(one),
+    NewReplicas = database_replicas(two),
+    State0 = ready_database(ReplaceId, <<20:128>>, OldReplicas),
+    ReplaceOp = <<21:128>>,
+    Replace = {prepare_database_restore, ReplaceId, ReplaceOp, 1, 2,
+               NewReplicas, Backup, replace},
+    {State1, ok} = erlite_catalog_machine:apply(#{index => 3}, Replace, State0),
+    {State1, ok} = erlite_catalog_machine:apply(#{index => 4}, Replace, State1),
+    {ok, #{state := restoring, generation := 2,
+           restore := #{previous_replicas := OldReplicas}}} =
+        erlite_catalog_machine:database(ReplaceId, State1),
+    [_] = erlite_catalog_machine:recoverable(State1),
+    {State1, {error, {stale_generation, 1, 2}}} =
+        erlite_catalog_machine:apply(
+          #{index => 5},
+          {finish_database_restore, ReplaceId, ReplaceOp, 1}, State1),
+    Finish = {finish_database_restore, ReplaceId, ReplaceOp, 2},
+    {State2, ok} = erlite_catalog_machine:apply(#{index => 6}, Finish, State1),
+    {State2, ok} = erlite_catalog_machine:apply(#{index => 7}, Finish, State2),
+    {ok, Ready} = erlite_catalog_machine:database(ReplaceId, State2),
+    ready = maps:get(state, Ready),
+    false = maps:is_key(restore, Ready),
+
+    CloneId = <<"clone-target">>,
+    CloneOp = <<22:128>>,
+    Clone = {prepare_database_restore, CloneId, CloneOp, 0, 1,
+             database_replicas(three), Backup, clone},
+    {State3, ok} = erlite_catalog_machine:apply(#{index => 8}, Clone, State2),
+    {ok, #{state := restoring, generation := 1,
+           restore := #{mode := clone}}} =
+        erlite_catalog_machine:database(CloneId, State3).
+
+replace_restore_rejects_a_different_database_backup_test() ->
+    DatabaseId = <<"replace-identity-target">>,
+    Replicas = database_replicas(one),
+    State = ready_database(DatabaseId, <<23:128>>, Replicas),
+    Command = {prepare_database_restore, DatabaseId, <<24:128>>, 1, 2,
+               database_replicas(two),
+               backup_descriptor(<<"different-database">>), replace},
+    {State, {error, backup_database_mismatch}} =
+        erlite_catalog_machine:apply(#{index => 3}, Command, State),
+    {ok, #{state := ready, generation := 1, replicas := Replicas}} =
+        erlite_catalog_machine:database(DatabaseId, State).
+
+backup_descriptor(DatabaseId) ->
+    #{database_id => DatabaseId, generation => 4, raft_index => 99,
+      raft_term => 7, schema_version => 3, created_at => 1000,
+      sha256 => <<0:256>>, manifest_path => "/backups/test.manifest",
+      source_server => {database_one1, node()}}.
+
 ready_database(DatabaseId, OperationId, Replicas) ->
     State0 = catalog_state(),
     {State1, ok} = erlite_catalog_machine:apply(

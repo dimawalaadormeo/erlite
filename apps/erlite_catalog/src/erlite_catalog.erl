@@ -5,6 +5,7 @@
          prepare_database_delete/5, tombstone_database/5,
          prepare_database_move/7, mark_database_replacement_ready/5,
          finish_database_move/5,
+         prepare_database_restore/9, finish_database_restore/5,
          mark_database_under_replicated/7,
          clear_database_under_replicated/5, prepare_database_repair/7,
          clear_stale_replica/5,
@@ -86,6 +87,20 @@ mark_database_replacement_ready(ServerRef, DatabaseId, OperationId, Generation,
 finish_database_move(ServerRef, DatabaseId, OperationId, Generation, Timeout) ->
     command(ServerRef,
             {finish_database_move, DatabaseId, OperationId, Generation},
+            Timeout).
+
+prepare_database_restore(ServerRef, DatabaseId, OperationId,
+                         ExpectedGeneration, NewGeneration, Replicas, Backup,
+                         Mode, Timeout) ->
+    command(ServerRef,
+            {prepare_database_restore, DatabaseId, OperationId,
+             ExpectedGeneration, NewGeneration, Replicas, Backup, Mode},
+            Timeout).
+
+finish_database_restore(ServerRef, DatabaseId, OperationId, Generation,
+                        Timeout) ->
+    command(ServerRef,
+            {finish_database_restore, DatabaseId, OperationId, Generation},
             Timeout).
 
 -spec mark_database_under_replicated(term(), binary(), binary(), pos_integer(),

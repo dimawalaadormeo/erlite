@@ -4,12 +4,14 @@
          expand_three_to_four_and_move/1,
          expand_four_to_six_and_move/1,
          automatic_rebalancing_uses_safe_movement/1,
+         backup_clone_restore_and_export/1,
          movement_reconciles_membership_crash_points/1,
          movement_reconciles_registry_crash/1]).
 
 all() -> [expand_three_to_four_and_move,
           expand_four_to_six_and_move,
           automatic_rebalancing_uses_safe_movement,
+          backup_clone_restore_and_export,
           movement_reconciles_membership_crash_points,
           movement_reconciles_registry_crash].
 
@@ -166,6 +168,76 @@ automatic_rebalancing_uses_safe_movement(Config) ->
                                                DatabaseId,
                                                <<"SELECT value FROM moved">>,
                                                [], 15000),
+    ok.
+
+backup_clone_restore_and_export(Config) ->
+    Catalog = proplists:get_value(catalog, Config),
+    Root = proplists:get_value(root, Config),
+    SourceId = <<"phase10-backup-source">>,
+    CloneId = <<"phase10-backup-clone">>,
+    ok = erlite_database_lifecycle:create(SourceId),
+    ok = seed_and_write(SourceId),
+    {ok, Backup = #{raft_index := BackupIndex, raft_term := BackupTerm,
+                    created_at := CreatedAt, sha256 := Digest}} =
+        erlite_database_lifecycle:backup(SourceId),
+    true = BackupIndex > 0,
+    true = BackupTerm > 0,
+    true = CreatedAt > 0,
+    32 = byte_size(Digest),
+    ExportPath = filename:join(Root, "phase10-export.erlite"),
+    ok = erlite_database_lifecycle:export(Backup, ExportPath),
+    {ok, _ExportManifest, _ImageName, _ImageBinary} =
+        erlite_raft_snapshot:read_export(ExportPath),
+
+    ok = erlite_database_lifecycle:clone(CloneId, Backup),
+    {ok, #{state := ready, generation := 1, replicas := CloneReplicas}} =
+        erlite_catalog:database(Catalog, CloneId, 15000, consistent),
+    {ok, #{rows := [[<<"preserved">>]]}} = erlite_databases:query(
+                                               CloneId,
+                                               <<"SELECT value FROM moved">>,
+                                               [], 15000),
+    {ok, CloneMembers, _} = ra:members(CloneReplicas, 15000),
+    CloneReplicas = lists:sort(CloneMembers),
+
+    OtherId = <<"phase10-different-backup-source">>,
+    ok = erlite_database_lifecycle:create(OtherId),
+    ok = seed_and_write(OtherId),
+    {ok, OtherExtra} = erlite_raft_command:new_transaction(
+                         <<"phase10-other-extra">>, 0,
+                         [{<<"INSERT INTO moved(value) VALUES(?)">>,
+                           [<<"belongs-only-to-other">>]}]),
+    {ok, _} = erlite_databases:write(OtherId, OtherExtra, 15000),
+    {ok, OtherBackup} = erlite_database_lifecycle:backup(OtherId),
+    {error, backup_database_mismatch} =
+        erlite_database_lifecycle:restore(SourceId, OtherBackup),
+    {ok, #{state := ready, generation := 1}} = erlite_catalog:database(
+                                                  Catalog, SourceId, 15000,
+                                                  consistent),
+    {ok, #{rows := [[1]]}} = erlite_databases:query(
+                                SourceId, <<"SELECT count(*) FROM moved">>,
+                                [], 15000),
+
+    {ok, Extra} = erlite_raft_command:new_transaction(
+                    <<"phase10-extra">>, 0,
+                    [{<<"INSERT INTO moved(value) VALUES(?)">>,
+                      [<<"discarded-by-restore">>]}]),
+    {ok, _} = erlite_databases:write(SourceId, Extra, 15000),
+    ok = erlite_database_lifecycle:restore(SourceId, Backup),
+    {ok, #{state := ready, generation := 2}} = erlite_catalog:database(
+                                                  Catalog, SourceId, 15000,
+                                                  consistent),
+    {ok, #{rows := [[1]]}} = erlite_databases:query(
+                                SourceId, <<"SELECT count(*) FROM moved">>,
+                                [], 15000),
+    SourceServer = maps:get(source_server, Backup),
+    ManifestPath = maps:get(manifest_path, Backup),
+    {ok, _Manifest, ImagePath} = rpc:call(
+                                   element(2, SourceServer),
+                                   erlite_raft_snapshot, verify_backup,
+                                   [ManifestPath]),
+    ok = file:write_file(ImagePath, <<"corrupt">>, [append]),
+    {error, snapshot_checksum_mismatch} =
+        erlite_database_lifecycle:clone(<<"phase10-corrupt-clone">>, Backup),
     ok.
 
 movement_reconciles_membership_crash_points(Config) ->

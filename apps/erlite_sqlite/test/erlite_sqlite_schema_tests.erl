@@ -120,6 +120,29 @@ logical_transaction_retry_is_deduplicated_and_conflicts_fail_closed_test() ->
               Connection
       end).
 
+reset_raft_history_preserves_user_data_and_clears_source_ledger_test() ->
+    with_database(
+      fun(_Path, Connection) ->
+              ok = erlite_sqlite_schema:initialize(Connection),
+              {ok, _} = erlite_sqlite:execute(
+                          Connection,
+                          <<"CREATE TABLE restored (value TEXT)">>, []),
+              {ok, applied} = apply(
+                                Connection, 0, 7, <<"old-tx">>, <<"old">>,
+                                [{execute,
+                                  <<"INSERT INTO restored VALUES (?)">>,
+                                  [<<"kept">>]}]),
+              ok = erlite_sqlite_schema:reset_raft_history(Connection),
+              {ok, 0} = erlite_sqlite_schema:last_applied_index(Connection),
+              new = erlite_sqlite_schema:transaction_status(
+                      Connection, <<"old-tx">>, hash(<<"old">>)),
+              {ok, #{rows := [[<<"kept">>]]}} = erlite_sqlite:query(
+                                                    Connection,
+                                                    <<"SELECT value FROM restored">>,
+                                                    []),
+              Connection
+      end).
+
 apply(Connection, Expected, Index, TransactionId, Command, Statements) ->
     erlite_sqlite_schema:apply_committed(
       Connection, Expected, Index, TransactionId, hash(Command), Statements).

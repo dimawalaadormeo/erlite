@@ -874,11 +874,14 @@ Build:
 
 Provide PHP and Python examples.
 
-**Development checkpoint (2026-09-08):** Phase 9 is complete. Automatic
-rebalancing is catalog-leader-owned, deterministic, bounded, serialized with
-repair, and tested through real six-node movement with preserved SQLite data.
-Final verification completed 85 EUnit tests and 17 Common Test cases. Resume
-with Phase 10 backup and restore.
+**Development checkpoint (2026-09-08):** Phase 10 is complete. Backups bind a
+verified SQLite image to database identity, placement generation, applied Raft
+index and term, schema/runtime versions, creation time, and checksum. Replace
+restore and clone use durable `restoring` catalog fencing and always start a new
+Raft history after atomically resetting the imported image's internal Raft
+ledger. Portable export and corruption rejection are covered. Final
+verification completed 88 EUnit tests and 18 Common Test cases. Resume with
+Phase 11 fleet migrations.
 
 ### Phase 7 — Node expansion and database movement
 
@@ -930,6 +933,8 @@ excluded, and interrupted durable movements remain lifecycle-reconciled.
 
 ### Phase 10 — Backup and restore
 
+**Status: complete**
+
 Build:
 
 - backup
@@ -945,6 +950,41 @@ Restore must have explicit modes:
 - clone into a new `DatabaseId` and new Raft history.
 
 Restore must never silently attach an old SQLite image to an incompatible live Raft log. Backup-format and restore semantics must be designed during the replication phases even though the user-facing implementation is scheduled here.
+
+Phase 10 takes a quorum barrier, catches a live SQLite replica up through that
+barrier, and publishes a standalone image only after verifying its checksum,
+runtime identity, and durable applied index. The manifest records the source
+database ID, placement generation, committed/applied Raft index and term,
+schema version, SQLite runtime identity, creation time, image name, and SHA-256
+checksum. Export writes the verified manifest and image into a versioned,
+compressed portable artifact and durably syncs the destination directory.
+
+The lifecycle interface provides:
+
+```erlang
+{ok, Backup} = erlite_database_lifecycle:backup(DatabaseId),
+ok = erlite_database_lifecycle:export(Backup, ExportPath),
+ok = erlite_database_lifecycle:restore(DatabaseId, Backup),
+ok = erlite_database_lifecycle:clone(NewDatabaseId, Backup).
+```
+
+Replacement restore advances the existing database generation. Clone requires
+a new `DatabaseId` and starts at generation one. The catalog rejects a
+replacement backup whose embedded database identity differs from the target;
+cross-database restoration is available only through explicit clone mode. Both
+modes commit a durable,
+operation-ID-fenced `restoring` catalog record before physical work and remain
+unroutable until the new three-member placement is ready. Reconciliation
+discovers incomplete restores after lifecycle restart.
+
+Every target image is materialized offline. Erlite preserves application schema
+and data while atomically resetting the imported applied index and clearing the
+source transaction ledger, then starts a new generation-specific Raft group.
+This prevents an old SQLite image from being attached to an incompatible live
+Raft history. Unit tests cover catalog fencing and history reset; distributed
+Common Test covers backup, export, clone, replacement restore, preserved data,
+discarding post-backup writes, independent membership, and corruption rejection.
+The accepted protocol is recorded in ADR 0004.
 
 ### Phase 11 — Fleet migrations
 

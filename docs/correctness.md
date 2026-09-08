@@ -157,6 +157,37 @@ consistent catalog read. A submitted migration remains durable and resumable;
 catalog operation-ID and generation fences prevent another planner or repair
 worker from overlapping it.
 
+## Backup, restore, and clone
+
+A backup starts with a quorum barrier, catches a live SQLite owner through that
+barrier, and creates a standalone SQLite snapshot through the serialized owner.
+Its manifest binds the source database ID and placement generation, committed
+and applied Raft index and term, schema version, SQLite runtime identity,
+creation time, image basename, and SHA-256 checksum. Success is returned only
+after reopening the image, verifying runtime compatibility, checksum, and the
+internal durable applied index. A portable export carries this manifest and the
+exact image bytes in a versioned envelope.
+
+Replace and clone are distinct catalog operations. Replace advances the target
+generation; clone requires a previously unused target ID and begins at
+generation one. The catalog accepts replacement only when the backup's embedded
+database identity exactly matches the target; cross-database use is permitted
+only through the explicit clone mode. Both durably record `restoring`, a random
+operation ID, the new
+placement, mode, and backup descriptor before destructive or constructive
+physical work. `restoring` is unroutable and returned by recovery discovery.
+Identical retries are accepted; conflicting operation IDs and stale generations
+fail closed. Movement, repair, delete, create, and restore cannot overlap.
+
+The source image is verified again before every materialization. Each target
+copy is offline while one SQLite transaction clears the source transaction-ID
+ledger and resets `last_applied_raft_index` to zero; user schema and data remain
+unchanged. Only afterward may Erlite start the target's new generation-specific
+Ra group. `ready` is committed only when the new controller has all recorded
+replicas. Thus no backup is silently attached to an incompatible live Raft
+history, and a crash leaves a catalog-visible operation that reconciliation can
+resume.
+
 ## External service boundary
 
 Phase 6 never exposes a plaintext listener. Enabling the HTTP service requires TLS certificate material and at least one configured bearer credential. Tokens are compared in constant time and removed from the authenticated identity before dispatch. Admin authorization is required for create, delete, and fleet listing; service identities can access only their explicit database allow-list.
