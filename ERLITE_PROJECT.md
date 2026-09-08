@@ -874,11 +874,11 @@ Build:
 
 Provide PHP and Python examples.
 
-**Development checkpoint (2026-09-08):** Phase 8 is complete. Automatic repair
-is catalog-fenced, grace-delayed, resumable, and tested against a real failed
-member, unavailable replacement capacity, successful catch-up, and stale-node
-return. Final verification completed 82 EUnit tests and 15 Common Test cases.
-Resume with Phase 9 automatic rebalancing.
+**Development checkpoint (2026-09-08):** Phase 9 is complete. Automatic
+rebalancing is catalog-leader-owned, deterministic, bounded, serialized with
+repair, and tested through real six-node movement with preserved SQLite data.
+Final verification completed 85 EUnit tests and 17 Common Test cases. Resume
+with Phase 10 backup and restore.
 
 ### Phase 7 — Node expansion and database movement
 
@@ -912,6 +912,8 @@ cleaned.
 
 ### Phase 9 — Automatic rebalancing
 
+**Status: complete**
+
 Build:
 
 - imbalance detection
@@ -919,6 +921,12 @@ Build:
 - migration queue
 - concurrency limits
 - safe movement
+
+The catalog-leader planner balances ready replicas by replica count across
+healthy active nodes. Each consistent scan builds a deterministic, bounded,
+sequential migration queue and delegates every item to the durable Phase 7
+movement workflow. Databases with lifecycle, movement, or repair work are
+excluded, and interrupted durable movements remain lifecycle-reconciled.
 
 ### Phase 10 — Backup and restore
 

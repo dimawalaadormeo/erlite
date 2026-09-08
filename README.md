@@ -6,8 +6,8 @@ SQLite databases across a cluster. Each database is an independent RabbitMQ
 databases across Erlite nodes.
 
 Development follows the phased plan in
-[`ERLITE_PROJECT.md`](ERLITE_PROJECT.md). Phases 0 through 8 are complete; the
-next roadmap item is automatic rebalancing.
+[`ERLITE_PROJECT.md`](ERLITE_PROJECT.md). Phases 0 through 9 are complete; the
+next roadmap item is backup and restore.
 
 ## Current capabilities
 
@@ -81,6 +81,14 @@ The accepted movement and repair protocols are documented in
 [`docs/adr/0001-durable-database-movement.md`](docs/adr/0001-durable-database-movement.md)
 and
 [`docs/adr/0002-automatic-replica-repair.md`](docs/adr/0002-automatic-replica-repair.md).
+
+## Automatic rebalancing
+
+The catalog leader incrementally balances ready replicas across healthy active
+nodes. Each scan selects at most one sequential migration by default and runs
+it through the durable movement protocol. Databases already moving or repairing
+are excluded. The decision is documented in
+[`docs/adr/0003-automatic-rebalancing.md`](docs/adr/0003-automatic-rebalancing.md).
 
 ## License
 

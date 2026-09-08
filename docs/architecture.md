@@ -38,6 +38,12 @@ Phase 7 adds a catalog-persisted movement protocol and physical mover. A ready d
 
 Phase 8 supervises a periodic replica repair worker. It derives health from node reachability plus the presence of each named Ra server, persists an under-replicated record and grace-period timestamp in the catalog, and turns an expired record into a repair-kind movement. Repair snapshots from a surviving member, never the failed source. A removed unreachable member is retained as a catalog-tracked stale replica; routing excludes it, and its Ra and SQLite state is deleted when the node returns. Manual movement and automatic repair share the same per-database catalog fence. The decision is recorded in ADR 0002.
 
+Phase 9 adds a catalog-leader rebalancer. It derives replica counts from a
+consistent catalog read, excludes unhealthy nodes and databases with active
+repair or movement, and creates a deterministic bounded migration queue. Each
+queued item uses the Phase 7 movement workflow, and every later scan replans
+from committed catalog state. The decision is recorded in ADR 0003.
+
 Phase 6 adds the supervised `erlite_api_server`, a TLS-only HTTP/1.1 JSON boundary. It authenticates configured bearer credentials using constant-time comparison and passes token-free identities to `erlite_api_handler`. Admin identities may invoke lifecycle controls; service identities are limited to their database allow-list. Each data request consistently resolves the catalog record and idempotently attaches a local controller to the already-running Ra group when necessary. Queries pass a read-only policy and execute with SQLite `query_only` enforcement; replicated transactions pass the existing deterministic command validator. Header, body, socket, and operation timeouts are bounded. Malformed transport input is rejected with a JSON `400` response before dispatch.
 
 A cold database closes its SQLite owners but keeps its Ra membership and durable files. Its next read or write reopens every owner, verifies the group's runtime identity, catches the serving replica up through a quorum barrier, and only then serves the operation. Database status reports lifecycle mode, open-owner count, replica file bytes, and sampled controller, SQLite-owner, and Ra-server process memory.

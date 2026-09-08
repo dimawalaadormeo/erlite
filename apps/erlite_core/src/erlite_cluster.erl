@@ -104,7 +104,8 @@ status_and_configure(Root, ServerId, Timeout) ->
                                 RepairPid when is_pid(RepairPid) ->
                                     case erlite_replica_repair:configure(
                                            ServerId, Root) of
-                                        ok -> Result;
+                                        ok -> configure_rebalancer(
+                                                ServerId, Root, Result);
                                         RepairError -> RepairError
                                     end;
                                 undefined -> Result
@@ -114,6 +115,16 @@ status_and_configure(Root, ServerId, Timeout) ->
                 undefined -> Result
             end;
         Error -> Error
+    end.
+
+configure_rebalancer(ServerId, Root, Result) ->
+    case whereis(erlite_rebalancer) of
+        Pid when is_pid(Pid) ->
+            case erlite_rebalancer:configure(ServerId, Root) of
+                ok -> Result;
+                Error -> Error
+            end;
+        undefined -> Result
     end.
 
 existing_or_new_cluster_id(Root) ->
