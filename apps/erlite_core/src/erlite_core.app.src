@@ -11,6 +11,9 @@
   {env, [{replication_factor, 3}, {seed_nodes, []},
          {repair_grace_period_ms, 30000}, {repair_scan_interval_ms, 5000},
          {rebalance_scan_interval_ms, 10000},
-         {rebalance_max_migrations_per_scan, 1}]},
+         {rebalance_max_migrations_per_scan, 1},
+         {placement_options, #{disk_reserve_bytes => 1073741824,
+                               default_database_size_bytes => 0,
+                               node_metrics => #{}, databases => #{}}}]},
   {modules, []}
  ]}.

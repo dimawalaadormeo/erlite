@@ -157,6 +157,22 @@ consistent catalog read. A submitted migration remains durable and resumable;
 catalog operation-ID and generation fences prevent another planner or repair
 worker from overlapping it.
 
+Resource observations and placement-group preferences are scheduling hints;
+they never authorize a membership change. A node below the configured disk
+reserve is ineligible for a new replica, and every selected move still enters
+the durable snapshot, catch-up, verification, membership-change, and source
+retirement protocol. Missing metrics fall back to replica-count placement.
+Replica scoring counts the complete catalog inventory, including temporary
+replacement replicas from movements and repairs, so concurrent work cannot
+make a target appear artificially empty.
+
+Leader balancing is distinct from replica movement. It considers only ready
+databases without movement or repair fences and targets an existing voter on
+a catalog-active, currently reachable node.
+RabbitMQ `ra` rejects a target that is not caught up. A failed or ambiguous
+leadership transfer does not change catalog placement or trigger replica
+removal; a later scan rediscovers the authoritative leader.
+
 ## Backup, restore, and clone
 
 A backup starts with a quorum barrier, catches a live SQLite owner through that

@@ -1010,6 +1010,8 @@ database packs share this ordered representation. See ADR 0005.
 
 ### Phase 12 — Placement improvements
 
+**Status: complete**
+
 Add:
 
 - size awareness
@@ -1017,6 +1019,14 @@ Add:
 - load awareness
 - leader balancing
 - placement groups
+
+Placement decisions use a deterministic composite score over replica count,
+estimated database size, disk utilization, node load, and optional `spread` or
+`pack` placement groups. A configured disk reserve is a hard admission gate;
+missing observations retain count-based behavior. Initial creation and periodic
+rebalancing share the policy. A separately bounded pass balances leaders using
+RabbitMQ `ra` leadership transfer. Replica changes still use Phase 7 movement.
+See ADR 0006.
 
 ### Phase 13 — Hardening
 

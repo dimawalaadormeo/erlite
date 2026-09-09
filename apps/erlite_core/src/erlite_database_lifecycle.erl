@@ -452,15 +452,20 @@ replacement_server_id(DatabaseId, Generation, TargetNode) ->
 
 choose_replicas(DatabaseId, Generation, Catalog) ->
     case erlite_catalog:status(Catalog, ?TIMEOUT, consistent) of
-        {ok, #{nodes := Nodes}} ->
+        {ok, #{nodes := Nodes, databases := Databases}} ->
             Active = lists:sort(
                        [element(2, maps:get(server_id, NodeRecord))
                         || NodeRecord <- Nodes,
                            maps:get(state, NodeRecord, active) =:= active]),
-            case lists:sublist(Active, 3) of
-                Three when length(Three) =:= 3 ->
+            Options0 = application:get_env(erlite_core, placement_options, #{}),
+            Options = erlite_placement:effective_options(DatabaseId, Options0),
+            case erlite_placement:choose_initial(DatabaseId, Databases,
+                                                 Active, Options) of
+                {ok, Three} ->
                     {ok, make_server_ids(DatabaseId, Generation, Three)};
-                _ -> {error, insufficient_active_nodes}
+                {error, insufficient_placement_capacity} ->
+                    {error, insufficient_active_nodes};
+                Error -> Error
             end;
         Error -> Error
     end.
