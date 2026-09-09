@@ -60,6 +60,18 @@ replicated in the catalog, so pause/resume, retry budgets, and reporting survive
 controller or catalog-leader changes. A sorted canary cohort completes before
 bounded later batches. The decision is recorded in ADR 0005.
 
+Phase 12 adds the pure `erlite_placement` policy shared by initial creation and
+the rebalancer. It ranks nodes deterministically using replica count, estimated
+database bytes, disk utilization, node load, and placement-group affinity or
+anti-affinity. Disk reserve is a hard eligibility constraint. Metrics are
+operator observations supplied in `erlite_core`'s `placement_options`; absent
+observations fall back to neutral values and count balancing. After bounded
+replica movements, the catalog-leader rebalancer independently discovers each
+database leader and performs bounded `ra:transfer_leadership/3` calls toward
+less leader-heavy replica nodes that are catalog-active and reachable. Planner
+load includes catalog-visible temporary replacement replicas, even though a
+database with an active movement or repair remains ineligible for another move.
+
 Phase 6 adds the supervised `erlite_api_server`, a TLS-only HTTP/1.1 JSON boundary. It authenticates configured bearer credentials using constant-time comparison and passes token-free identities to `erlite_api_handler`. Admin identities may invoke lifecycle controls; service identities are limited to their database allow-list. Each data request consistently resolves the catalog record and idempotently attaches a local controller to the already-running Ra group when necessary. Queries pass a read-only policy and execute with SQLite `query_only` enforcement; replicated transactions pass the existing deterministic command validator. Header, body, socket, and operation timeouts are bounded. Malformed transport input is rejected with a JSON `400` response before dispatch.
 
 A cold database closes its SQLite owners but keeps its Ra membership and durable files. Its next read or write reopens every owner, verifies the group's runtime identity, catches the serving replica up through a quorum barrier, and only then serves the operation. Database status reports lifecycle mode, open-owner count, replica file bytes, and sampled controller, SQLite-owner, and Ra-server process memory.

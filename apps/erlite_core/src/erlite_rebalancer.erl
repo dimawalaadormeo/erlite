@@ -1,7 +1,7 @@
 -module(erlite_rebalancer).
 -behaviour(gen_server).
 
--export([start_link/0, configure/2, scan/0, plan/3]).
+-export([start_link/0, configure/2, scan/0, plan/3, plan/4]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
 -define(TIMEOUT, 15000).
@@ -68,7 +68,11 @@ scan_as_controller(Catalog) ->
                                node_healthy(Node)]),
             Limit = application:get_env(
                       erlite_core, rebalance_max_migrations_per_scan, 1),
-            execute(plan(Databases, Nodes, Limit), []);
+            Options = application:get_env(erlite_core, placement_options, #{}),
+            case execute(plan(Databases, Nodes, Limit, Options), []) of
+                ok -> refresh_and_balance_leaders(Catalog, Limit);
+                Error -> Error
+            end;
         Error -> Error
     end.
 
@@ -83,11 +87,54 @@ execute([{DatabaseId, Source, Target} | Rest], Errors) ->
         Error -> execute(Rest, [{DatabaseId, Error} | Errors])
     end.
 
+refresh_and_balance_leaders(Catalog, Limit) ->
+    case erlite_catalog:status(Catalog, ?TIMEOUT, consistent) of
+        {ok, #{nodes := NodeRecords, databases := Databases}} ->
+            HealthyNodes = [Node || #{state := active,
+                                      server_id := {_, Node}} <- NodeRecords,
+                                    node_healthy(Node)],
+            balance_leaders(Databases, HealthyNodes, Limit);
+        Error -> Error
+    end.
+
+balance_leaders(Databases, HealthyNodes, Limit) ->
+    Eligible = [D || D = #{state := ready} <- Databases,
+                     not maps:is_key(movement, D),
+                     not maps:is_key(repair, D)],
+    Leaders = lists:foldl(
+      fun(#{database_id := Id, replicas := Replicas}, Acc) ->
+              case ra:members(Replicas, ?TIMEOUT) of
+                  {ok, Members, Leader} ->
+                      case lists:member(Leader, Members) of
+                          true -> Acc#{Id => Leader};
+                          false -> Acc
+                      end;
+                  _ -> Acc
+              end
+      end, #{}, Eligible),
+    execute_leader_plan(erlite_placement:leader_plan(
+                          Eligible, Leaders, HealthyNodes, Limit), []).
+
+execute_leader_plan([], []) -> ok;
+execute_leader_plan([], Errors) ->
+    {error, {leader_balance_failed, lists:reverse(Errors)}};
+execute_leader_plan([{Id, Leader, Target} | Rest], Errors) ->
+    case ra:transfer_leadership(Leader, Target, ?TIMEOUT) of
+        ok -> execute_leader_plan(Rest, Errors);
+        already_leader -> execute_leader_plan(Rest, Errors);
+        Error -> execute_leader_plan(Rest, [{Id, Error} | Errors])
+    end.
+
 -spec plan([map()], [node()], non_neg_integer()) ->
     [{binary(), term(), node()}].
 plan(Databases, ActiveNodes, Limit)
   when is_list(Databases), is_list(ActiveNodes),
        is_integer(Limit), Limit >= 0 ->
+    plan(Databases, ActiveNodes, Limit, #{}).
+
+plan(Databases, ActiveNodes, Limit, Options)
+  when is_list(Databases), is_list(ActiveNodes),
+       is_integer(Limit), Limit >= 0, is_map(Options) ->
     Stable = lists:sort(
                fun(A, B) -> maps:get(database_id, A) =<
                                 maps:get(database_id, B) end,
@@ -95,51 +142,69 @@ plan(Databases, ActiveNodes, Limit)
                      not maps:is_key(movement, D),
                      not maps:is_key(repair, D),
                      replicas_on_active_nodes(Replicas, ActiveNodes)]),
-    plan_loop(Stable, replica_counts(Databases, ActiveNodes), ActiveNodes,
-              Limit, []).
+    plan_loop(Stable, Databases, replica_counts(Databases, ActiveNodes),
+              ActiveNodes, Limit, [], Options).
 
-plan_loop(_Databases, _Counts, _Nodes, 0, Acc) -> lists:reverse(Acc);
-plan_loop(Databases, Counts, Nodes, Remaining, Acc) ->
-    case choose_move(Databases, Counts, Nodes) of
+plan_loop(_Candidates, _Inventory, _Counts, _Nodes, 0, Acc, _Options) ->
+    lists:reverse(Acc);
+plan_loop(Candidates, Inventory, Counts, Nodes, Remaining, Acc, Options) ->
+    case choose_move(Candidates, Inventory, Counts, Nodes, Options) of
         none -> lists:reverse(Acc);
         {Database, Source, Target} ->
             DatabaseId = maps:get(database_id, Database),
             SourceNode = element(2, Source),
             Updated = Counts#{SourceNode => maps:get(SourceNode, Counts) - 1,
                               Target => maps:get(Target, Counts) + 1},
-            plan_loop(lists:delete(Database, Databases), Updated, Nodes,
-                      Remaining - 1,
-                      [{DatabaseId, Source, Target} | Acc])
+            Projected = project_move(Database, Source, Target, Inventory),
+            plan_loop(lists:delete(Database, Candidates), Projected, Updated,
+                      Nodes, Remaining - 1,
+                      [{DatabaseId, Source, Target} | Acc], Options)
     end.
 
-choose_move(Databases, Counts, Nodes) ->
-    choose_source(nodes_by_load(Nodes, Counts, descending),
-                  nodes_by_load(Nodes, Counts, ascending), Databases, Counts).
+choose_move(Candidates, Inventory, Counts, Nodes, Options) ->
+    EstimatedSize = maps:get(default_database_size_bytes, Options, 0),
+    Ranked = erlite_placement:node_scores(Inventory, Nodes, Options,
+                                          EstimatedSize),
+    Targets = [N || {_, N} <- Ranked],
+    Sources = lists:reverse(Targets),
+    choose_source(Sources, Targets, Candidates, Counts, Options).
 
-choose_source([], _Targets, _Databases, _Counts) -> none;
-choose_source([SourceNode | Sources], Targets, Databases, Counts) ->
-    case choose_target(SourceNode, Targets, Databases, Counts) of
-        none -> choose_source(Sources, Targets, Databases, Counts);
+project_move(Database, Source, Target, Inventory) ->
+    Replicas = maps:get(replicas, Database),
+    Replacement = {projected_replacement, Target},
+    Updated = Database#{replicas => [Replacement | lists:delete(Source, Replicas)]},
+    [case maps:get(database_id, D) =:= maps:get(database_id, Database) of
+         true -> Updated;
+         false -> D
+     end || D <- Inventory].
+
+choose_source([], _Targets, _Databases, _Counts, _Options) -> none;
+choose_source([SourceNode | Sources], Targets, Databases, Counts, Options) ->
+    case choose_target(SourceNode, Targets, Databases, Counts, Options) of
+        none -> choose_source(Sources, Targets, Databases, Counts, Options);
         Move -> Move
     end.
 
-choose_target(_SourceNode, [], _Databases, _Counts) -> none;
-choose_target(SourceNode, [Target | Targets], Databases, Counts) ->
+choose_target(_SourceNode, [], _Databases, _Counts, _Options) -> none;
+choose_target(SourceNode, [Target | Targets], Databases, Counts, Options) ->
     case maps:get(SourceNode, Counts) - maps:get(Target, Counts) > 1 of
-        false -> none;
+        false -> choose_target(SourceNode, Targets, Databases, Counts, Options);
         true ->
-            case database_for_move(Databases, SourceNode, Target) of
-                none -> choose_target(SourceNode, Targets, Databases, Counts);
+            case database_for_move(Databases, SourceNode, Target, Options) of
+                none -> choose_target(SourceNode, Targets, Databases, Counts,
+                                      Options);
                 {Database, Source} -> {Database, Source, Target}
             end
     end.
 
-database_for_move([], _SourceNode, _Target) -> none;
+database_for_move([], _SourceNode, _Target, _Options) -> none;
 database_for_move([Database = #{replicas := Replicas} | Rest], SourceNode,
-                  Target) ->
-    case {server_on_node(Replicas, SourceNode), server_on_node(Replicas, Target)} of
-        {{ok, Source}, error} -> {Database, Source};
-        _ -> database_for_move(Rest, SourceNode, Target)
+                  Target, Options) ->
+    DatabaseId = maps:get(database_id, Database),
+    case {server_on_node(Replicas, SourceNode), server_on_node(Replicas, Target),
+          erlite_placement:can_place(DatabaseId, Target, Options)} of
+        {{ok, Source}, error, true} -> {Database, Source};
+        _ -> database_for_move(Rest, SourceNode, Target, Options)
     end.
 
 server_on_node(Replicas, Node) ->
@@ -155,20 +220,18 @@ replicas_on_active_nodes(Replicas, ActiveNodes) ->
 replica_counts(Databases, ActiveNodes) ->
     Empty = maps:from_list([{Node, 0} || Node <- ActiveNodes]),
     lists:foldl(
-      fun(#{state := ready, replicas := Replicas}, Counts) ->
+      fun(#{state := ready, replicas := Replicas} = Database, Counts) ->
+              EffectiveReplicas = case maps:find(movement, Database) of
+                  {ok, #{replacement := Replacement}} ->
+                      lists:usort([Replacement | Replicas]);
+                  _ -> Replicas
+              end,
               lists:foldl(
                 fun({_, Node}, Inner) ->
                         case maps:is_key(Node, Inner) of
                             true -> Inner#{Node => maps:get(Node, Inner) + 1};
                             false -> Inner
                         end
-                end, Counts, Replicas);
+                end, Counts, EffectiveReplicas);
          (_, Counts) -> Counts
       end, Empty, Databases).
-
-nodes_by_load(Nodes, Counts, ascending) ->
-    lists:sort(fun(A, B) -> {maps:get(A, Counts), A} =<
-                             {maps:get(B, Counts), B} end, Nodes);
-nodes_by_load(Nodes, Counts, descending) ->
-    lists:sort(fun(A, B) -> {maps:get(A, Counts), A} >=
-                             {maps:get(B, Counts), B} end, Nodes).
