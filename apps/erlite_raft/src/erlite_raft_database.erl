@@ -38,6 +38,7 @@ transaction_status(Owner, Command, CommittedIndex) ->
            Owner, TransactionId, CommandHash) of
         duplicate -> {ok, CommittedIndex};
         conflict -> {error, {transaction_id_conflict, TransactionId}};
+        rejected -> {error, {transaction_rejected, TransactionId}};
         new -> {error, {transaction_not_applied, TransactionId}};
         {error, _Reason} = Error -> Error
     end.

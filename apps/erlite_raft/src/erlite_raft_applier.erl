@@ -91,5 +91,7 @@ apply_entries(Owner, AppliedIndex,
         {ok, applied} -> apply_entries(Owner, RaftIndex, Rest);
         {ok, already_applied} -> apply_entries(Owner, RaftIndex, Rest);
         {ok, transaction_id_conflict} -> apply_entries(Owner, RaftIndex, Rest);
+        {ok, transaction_failed} -> apply_entries(Owner, RaftIndex, Rest);
+        {ok, migration_failed} -> apply_entries(Owner, RaftIndex, Rest);
         {error, _Reason} = Error -> Error
     end.

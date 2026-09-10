@@ -198,6 +198,26 @@ Check service health without authentication:
 curl --fail --cacert /path/to/ca.crt "$ERLITE_URL/v1/health"
 ```
 
+Use readiness for load-balancer admission. It performs a consistent catalog
+check and returns `503` during catalog quorum loss or when a required worker is
+down:
+
+```bash
+curl --fail --cacert /path/to/ca.crt "$ERLITE_URL/v1/ready"
+```
+
+Admins can inspect counters and aggregate resource measurements:
+
+```bash
+curl --fail --cacert /path/to/ca.crt \
+  -H "Authorization: Bearer $ERLITE_TOKEN" \
+  "$ERLITE_URL/v1/metrics"
+```
+
+Counters intentionally have no database-ID labels. The response includes API,
+query, write and migration totals/failures, VM process/run-queue/memory data,
+and aggregate database count, mode, and SQLite bytes.
+
 Create a database with an admin token:
 
 ```bash
@@ -301,7 +321,7 @@ certificates and should be configured with the deployment's trusted CA.
 
 ## Current project boundary
 
-Phases 0 through 11 are complete. Explicit movement, automatic replica repair,
+Phases 0 through 13 are complete. Explicit movement, automatic replica repair,
 bounded automatic rebalancing, fenced backup/restore, and fleet migrations are
 implemented.
 

@@ -25,12 +25,15 @@ list() ->
 status(DatabaseId) -> call_database(DatabaseId, status).
 placement(DatabaseId) -> call_database(DatabaseId, registry_metadata).
 write(DatabaseId, Command, Timeout) ->
-    call_database(DatabaseId, {write, Command, Timeout}).
+    observe(database_writes_total, database_write_failures_total,
+            call_database(DatabaseId, {write, Command, Timeout})).
 migrate(DatabaseId, Command, Timeout) ->
-    call_database(DatabaseId, {migrate, Command, Timeout}).
+    observe(database_migrations_total, database_migration_failures_total,
+            call_database(DatabaseId, {migrate, Command, Timeout})).
 migration_history(DatabaseId) -> call_database(DatabaseId, migration_history).
 query(DatabaseId, Sql, Params, Timeout) ->
-    call_database(DatabaseId, {query, Sql, Params, Timeout}).
+    observe(database_queries_total, database_query_failures_total,
+            call_database(DatabaseId, {query, Sql, Params, Timeout})).
 cool(DatabaseId) -> call_database(DatabaseId, cool).
 backup(DatabaseId, Generation, BackupRoot) ->
     call_database(DatabaseId, {backup, Generation, BackupRoot}).
@@ -180,6 +183,15 @@ movement_call(DatabaseId, Request, State) ->
 
 remove_route(Pid) ->
     ets:match_delete(?ROUTES, {'_', Pid}).
+
+observe(Total, Failed, Result) ->
+    erlite_observability:record(Total),
+    case Result of
+        {ok, _} -> ok;
+        ok -> ok;
+        _ -> erlite_observability:record(Failed)
+    end,
+    Result.
 
 reconcile_children() ->
     lists:foldl(

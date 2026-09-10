@@ -1,7 +1,8 @@
 # Erlite HTTP API
 
 Phase 6 provides a TLS-only HTTP/1.1 JSON service. The listener is disabled
-unless explicitly configured. Requests other than `GET /v1/health` require an
+unless explicitly configured. Requests other than `GET /v1/health` and
+`GET /v1/ready` require an
 `Authorization: Bearer <token>` header.
 
 ## Configuration
@@ -31,6 +32,10 @@ connections.
 ## Endpoints
 
 - `GET /v1/health` — unauthenticated process health.
+- `GET /v1/ready` — unauthenticated worker and catalog-quorum readiness; returns
+  `503` while degraded.
+- `GET /v1/metrics` — admin-only bounded counters, VM pressure, readiness, and
+  aggregate database resource measurements.
 - `GET /v1/databases` — admin catalog status and database list.
 - `POST /v1/databases` — admin create with `{"database_id":"..."}`.
 - `GET /v1/databases/{id}` — authorized database status.

@@ -6,8 +6,8 @@ SQLite databases across a cluster. Each database is an independent RabbitMQ
 databases across Erlite nodes.
 
 Development follows the phased plan in
-[`ERLITE_PROJECT.md`](ERLITE_PROJECT.md). Phases 0 through 10 are complete; the
-next roadmap item is fleet migrations.
+[`ERLITE_PROJECT.md`](ERLITE_PROJECT.md). Phases 0 through 13 are complete; the
+next roadmap item is scale validation.
 
 ## Current capabilities
 
@@ -25,6 +25,11 @@ next roadmap item is fleet migrations.
 - Quarantine and cleanup of stale replicas when failed nodes return
 - Verified backups, portable exports, fenced replacement restore, and cloning
   into an independent Raft history
+- Resource-aware placement, leader balancing, and placement groups
+- Fleet migrations with canaries, bounded batches, durable pause, and retries
+- Join-time rolling-upgrade compatibility checks for protocol, durable formats,
+  and SQLite runtime identity
+- Liveness, quorum-backed readiness, and bounded operational metrics
 
 Erlite scales across independent databases. It does not make one SQLite
 database horizontally multi-writer, provide cross-database transactions, or
@@ -38,8 +43,14 @@ until its Ra state and SQLite state have caught up and been verified. Movement
 repair, and restore are serialized per database and recorded in the catalog so
 they can resume after interruption.
 
+Disk-full and other resource failures do not advance a replica's durable
+applied index. Deterministic transaction and migration failures are durably
+recorded as failed no-ops while allowing later Raft entries to apply. Failed
+migrations leave schema version unchanged and pause the fleet canary.
+
 See [`docs/correctness.md`](docs/correctness.md) and
 [`docs/architecture.md`](docs/architecture.md) for the detailed invariants.
+The Phase 13 failure matrix is in [`docs/hardening.md`](docs/hardening.md).
 
 ## Getting started
 
@@ -126,6 +137,18 @@ The backup source referenced by `Backup` must remain reachable until restore or
 clone completes; exporting produces a durable portable artifact. The accepted
 protocol is documented in
 [`docs/adr/0004-fenced-backup-restore.md`](docs/adr/0004-fenced-backup-restore.md).
+
+## Health and metrics
+
+`GET /v1/health` is an unauthenticated process-liveness check. `GET /v1/ready`
+also requires no token and returns `200` only when the required workers are up
+and a consistent catalog query confirms three active catalog members. Admins
+can inspect bounded counters, VM pressure, and aggregate database resource
+measurements at `GET /v1/metrics`.
+
+Before joining, a node compares cluster protocol ranges, command and snapshot
+formats, and SQLite runtime identity with the seed. Incompatible releases fail
+before local cluster metadata or catalog membership is changed.
 
 ## License
 

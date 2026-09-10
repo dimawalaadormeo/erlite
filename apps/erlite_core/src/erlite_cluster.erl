@@ -35,6 +35,12 @@ init_with_identity(#{storage_path := Root}, Identity, ClusterName) ->
     {ok, map()} | {error, term()} | {timeout, term()}.
 join(SeedServer, #{storage_path := Root, node_name := NodeName,
                    cluster_name := ConfiguredName}, Timeout) ->
+    case release_preflight(SeedServer, Timeout) of
+        ok -> join_compatible(SeedServer, Root, NodeName, ConfiguredName, Timeout);
+        Error -> Error
+    end.
+
+join_compatible(SeedServer, Root, NodeName, ConfiguredName, Timeout) ->
     case {erlite_catalog:status(SeedServer, Timeout, consistent),
           erlite_node_identity:ensure(Root, NodeName)} of
         {{ok, #{cluster_id := ClusterId, cluster_name := ConfiguredName}},
@@ -137,4 +143,17 @@ existing_or_new_cluster_id(Root) ->
 catalog_server_id() -> {erlite_catalog, node()}.
 
 node_record(#{node_id := NodeId, node_name := NodeName}, ServerId) ->
-    #{node_id => NodeId, node_name => NodeName, server_id => ServerId}.
+    #{node_id => NodeId, node_name => NodeName, server_id => ServerId,
+      release => erlite_release:metadata()}.
+
+release_preflight({_, SeedNode}, _Timeout) when SeedNode =:= node() ->
+    erlite_release:compatible(erlite_release:metadata(),
+                              erlite_release:metadata());
+release_preflight({_, SeedNode}, Timeout) when is_atom(SeedNode) ->
+    case rpc:call(SeedNode, erlite_release, metadata, [], Timeout) of
+        Remote when is_map(Remote) ->
+            erlite_release:compatible(erlite_release:metadata(), Remote);
+        {badrpc, Reason} -> {error, {release_preflight_failed, Reason}};
+        _ -> {error, release_preflight_failed}
+    end;
+release_preflight(_, _Timeout) -> {error, invalid_seed_server}.

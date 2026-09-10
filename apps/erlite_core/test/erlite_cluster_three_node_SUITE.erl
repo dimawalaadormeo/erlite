@@ -49,6 +49,15 @@ bootstrap_join_and_restart(Config) ->
     Config3 = cluster_config(Root, 3, Node3),
     {ok, _} = rpc:call(Node1, erlite_cluster, init_cluster, [Config1]),
     Seed = {erlite_catalog, Node1},
+    Release = rpc:call(Node1, erlite_release, metadata, []),
+    Future = Release#{cluster_protocol => 3, min_cluster_protocol => 2},
+    ok = rpc:call(Node1, erlite_release, set_test_metadata, [Future]),
+    {error, incompatible_cluster_protocol} =
+        rpc:call(Node2, erlite_cluster, join, [Seed, Config2, 15000]),
+    {error, node_identity_not_found} = rpc:call(
+                                         Node2, erlite_node_identity, load,
+                                         [maps:get(storage_path, Config2)]),
+    ok = rpc:call(Node1, erlite_release, clear_test_metadata, []),
     {ok, _} = rpc:call(Node2, erlite_cluster, join, [Seed, Config2, 15000]),
     {ok, Status} = rpc:call(Node3, erlite_cluster, join,
                             [Seed, Config3, 15000]),

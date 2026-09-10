@@ -46,6 +46,41 @@ query_policy_is_read_only_and_hides_internal_tables_test() ->
                  erlite_api_query_policy:validate(
                    <<"PRAGMA integrity_check">>)).
 
+readiness_metrics_and_malformed_body_are_observed_test() ->
+    {Pid, Owned} = ensure_observability(),
+    try
+        ok = erlite_observability:reset(),
+        {503, #{<<"status">> := <<"degraded">>}} =
+            erlite_api_handler:handle(
+              <<"GET">>, <<"/v1/ready">>, #{}, undefined),
+        {403, _} = erlite_api_handler:handle(
+                     <<"GET">>, <<"/v1/metrics">>, #{},
+                     #{role => service, databases => all}),
+        {200, Metrics} = erlite_api_handler:handle(
+                           <<"GET">>, <<"/v1/metrics">>, #{},
+                           #{role => admin}),
+        true = maps:is_key(<<"counters">>, Metrics),
+        {400, _} = erlite_api_handler:handle(
+                     <<"POST">>, <<"/v1/databases/db/transactions">>,
+                     #{<<"transaction_id">> => <<"malformed">>,
+                       <<"statements">> => [<<"not-an-object">>]},
+                     #{role => service, databases => [<<"db">>]}),
+        #{counters := Counters} = erlite_observability:snapshot(),
+        4 = maps:get(api_requests_total, Counters),
+        2 = maps:get(api_client_errors_total, Counters)
+    after
+        case Owned of true -> gen_server:stop(Pid); false -> ok end
+    end.
+
+ensure_observability() ->
+    case whereis(erlite_observability) of
+        undefined ->
+            {ok, Pid} = erlite_observability:start_link(),
+            unlink(Pid),
+            {Pid, true};
+        Pid -> {Pid, false}
+    end.
+
 tls_listener_requires_auth_test_() ->
     {timeout, 30, fun tls_listener_requires_auth/0}.
 
