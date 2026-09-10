@@ -118,21 +118,26 @@ expand_four_to_six_and_move(Config) ->
     ok = erlite_database_lifecycle:create(DatabaseId),
     {ok, #{replicas := Initial}} = erlite_catalog:database(
                                       Catalog, DatabaseId, 15000, consistent),
+    CandidateTargets = [Node || {_Peer, Node, _Number} <- Peers,
+                                not lists:any(fun({_, ReplicaNode}) ->
+                                                      ReplicaNode =:= Node
+                                              end, Initial)],
+    [Target1, Target2 | _] = CandidateTargets,
     [Source1, Source2 | _] = Initial,
     ok = seed_and_write(DatabaseId),
-    ok = erlite_database_lifecycle:move(DatabaseId, Source1, Node5),
+    ok = erlite_database_lifecycle:move(DatabaseId, Source1, Target1),
     {ok, #{replicas := Middle}} = erlite_catalog:database(
                                      Catalog, DatabaseId, 15000, consistent),
     ActualSource2 = case lists:member(Source2, Middle) of
                         true -> Source2;
                         false -> hd(Middle)
                     end,
-    ok = erlite_database_lifecycle:move(DatabaseId, ActualSource2, Node6),
+    ok = erlite_database_lifecycle:move(DatabaseId, ActualSource2, Target2),
     {ok, #{generation := 3, replicas := Final}} = erlite_catalog:database(
                                                     Catalog, DatabaseId,
                                                     15000, consistent),
-    true = lists:any(fun({_, Node}) -> Node =:= Node5 end, Final),
-    true = lists:any(fun({_, Node}) -> Node =:= Node6 end, Final),
+    true = lists:any(fun({_, Node}) -> Node =:= Target1 end, Final),
+    true = lists:any(fun({_, Node}) -> Node =:= Target2 end, Final),
     {ok, #{rows := [[<<"preserved">>]]}} = erlite_databases:query(
                                                DatabaseId,
                                                <<"SELECT value FROM moved">>,

@@ -72,6 +72,16 @@ less leader-heavy replica nodes that are catalog-active and reachable. Planner
 load includes catalog-visible temporary replacement replicas, even though a
 database with an active movement or repair remains ineligible for another move.
 
+Phase 13 adds `erlite_release` and the supervised `erlite_observability`
+service. Cluster join performs the release comparison before persistent local
+identity or catalog membership changes. Compatible protocol ranges must
+overlap; command format, snapshot format, and canonical SQLite runtime identity
+must match exactly. Observability owns a bounded-key ETS counter table and
+derives readiness from required-worker liveness plus a consistent catalog
+query. It reports aggregate database resource data without putting tenant or
+database IDs into metric labels.
+The durable policy is recorded in ADR 0007.
+
 Phase 6 adds the supervised `erlite_api_server`, a TLS-only HTTP/1.1 JSON boundary. It authenticates configured bearer credentials using constant-time comparison and passes token-free identities to `erlite_api_handler`. Admin identities may invoke lifecycle controls; service identities are limited to their database allow-list. Each data request consistently resolves the catalog record and idempotently attaches a local controller to the already-running Ra group when necessary. Queries pass a read-only policy and execute with SQLite `query_only` enforcement; replicated transactions pass the existing deterministic command validator. Header, body, socket, and operation timeouts are bounded. Malformed transport input is rejected with a JSON `400` response before dispatch.
 
 A cold database closes its SQLite owners but keeps its Ra membership and durable files. Its next read or write reopens every owner, verifies the group's runtime identity, catches the serving replica up through a quorum barrier, and only then serves the operation. Database status reports lifecycle mode, open-owner count, replica file bytes, and sampled controller, SQLite-owner, and Ra-server process memory.

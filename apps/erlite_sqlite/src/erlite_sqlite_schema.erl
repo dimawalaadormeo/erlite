@@ -7,7 +7,8 @@
 
 -define(FORMAT_VERSION, 1).
 
--type apply_result() :: applied | already_applied | transaction_id_conflict.
+-type apply_result() :: applied | already_applied | transaction_id_conflict |
+                        transaction_failed | migration_failed.
 
 -spec initialize(erlite_sqlite:connection()) -> ok | {error, term()}.
 initialize(Connection) ->
@@ -35,8 +36,18 @@ initialize(Connection) ->
            "transaction_id BLOB PRIMARY KEY, "
            "command_hash BLOB NOT NULL, "
            "original_raft_index INTEGER NOT NULL CHECK (original_raft_index > 0)"
-           ")">>,
-         []}
+         ")">>,
+         []},
+        {execute,
+         <<"CREATE TABLE IF NOT EXISTS __erlite_transaction_failures ("
+           "transaction_id BLOB PRIMARY KEY, command_hash BLOB NOT NULL, "
+           "raft_index INTEGER NOT NULL, sqlite_error INTEGER NOT NULL)">>, []},
+        {execute,
+         <<"CREATE TABLE IF NOT EXISTS __erlite_migration_failures ("
+           "migration_set BLOB NOT NULL, migration_id BLOB NOT NULL, "
+           "command_hash BLOB NOT NULL, raft_index INTEGER NOT NULL, "
+           "sqlite_error INTEGER NOT NULL, "
+           "PRIMARY KEY (migration_set, migration_id))">>, []}
     ],
     case erlite_sqlite:transaction(Connection, Statements) of
         {ok, _Results} -> ensure_schema_version_column(Connection);
@@ -80,16 +91,30 @@ last_applied_index(Connection) ->
     end.
 
 -spec transaction_status(erlite_sqlite:connection(), binary(), binary()) ->
-    new | duplicate | conflict | {error, term()}.
+    new | duplicate | rejected | conflict | {error, term()}.
 transaction_status(Connection, TransactionId, CommandHash) ->
     Sql = <<"SELECT command_hash FROM __erlite_transactions "
             "WHERE transaction_id = ?">>,
     case erlite_sqlite:query(Connection, Sql, [TransactionId]) of
-        {ok, #{rows := []}} -> new;
+        {ok, #{rows := []}} -> failed_transaction_status(
+                                 Connection, TransactionId, CommandHash);
         {ok, #{rows := [[CommandHash]]}} -> duplicate;
         {ok, #{rows := [[_DifferentHash]]}} -> conflict;
         {ok, #{rows := Rows}} ->
             {error, {invalid_transaction_record, TransactionId, Rows}};
+        {error, _Reason} = Error -> Error
+    end.
+
+failed_transaction_status(Connection, TransactionId, CommandHash) ->
+    case erlite_sqlite:query(
+           Connection,
+           <<"SELECT command_hash FROM __erlite_transaction_failures "
+             "WHERE transaction_id = ?">>, [TransactionId]) of
+        {ok, #{rows := []}} -> new;
+        {ok, #{rows := [[CommandHash]]}} -> rejected;
+        {ok, #{rows := [[_DifferentHash]]}} -> conflict;
+        {ok, #{rows := Rows}} ->
+            {error, {invalid_transaction_failure_record, TransactionId, Rows}};
         {error, _Reason} = Error -> Error
     end.
 
@@ -168,8 +193,17 @@ apply_valid_migration(Connection, ExpectedIndex, RaftIndex, Set, MigrationId,
                        <<"UPDATE __erlite_replica_metadata SET schema_version = ? "
                          "WHERE singleton = 1 AND schema_version = ?">>,
                        [ToVersion, FromVersion]},
-            commit_with_index(Connection, RaftIndex,
-                              Statements ++ [Record, Version], applied);
+            case commit_with_index(Connection, RaftIndex,
+                                   Statements ++ [Record, Version], applied) of
+                {error, SqliteError} = Error ->
+                    case deterministic_migration_error(SqliteError) of
+                        true -> record_migration_failure(
+                                  Connection, RaftIndex, Set, MigrationId,
+                                  CommandHash, SqliteError);
+                        false -> Error
+                    end;
+                Result -> Result
+            end;
         {{ok, ExpectedIndex}, {ok, ToVersion}} ->
             case migration_record(Connection, Set, MigrationId) of
                 {ok, CommandHash, FromVersion, ToVersion} ->
@@ -219,6 +253,21 @@ migration_record(Connection, Set, MigrationId) ->
         Error -> Error
     end.
 
+%% SQLITE_ERROR (1) covers deterministic DDL errors such as an existing table.
+%% Resource and I/O failures are deliberately not acknowledged: their Raft
+%% index remains unapplied until storage recovers.
+deterministic_migration_error(1) -> true;
+deterministic_migration_error(_) -> false.
+
+record_migration_failure(Connection, RaftIndex, Set, MigrationId, CommandHash,
+                         SqliteError) ->
+    Failure = {execute,
+               <<"INSERT OR IGNORE INTO __erlite_migration_failures "
+                 "(migration_set,migration_id,command_hash,raft_index,sqlite_error) "
+                 "VALUES (?,?,?,?,?)">>,
+               [Set, MigrationId, CommandHash, RaftIndex, SqliteError]},
+    commit_with_index(Connection, RaftIndex, [Failure], migration_failed).
+
 apply_transaction(Connection, RaftIndex, TransactionId, CommandHash, Statements) ->
     case transaction_status(Connection, TransactionId, CommandHash) of
         new ->
@@ -229,6 +278,8 @@ apply_transaction(Connection, RaftIndex, TransactionId, CommandHash, Statements)
         conflict ->
             commit_with_index(Connection, RaftIndex, [],
                               transaction_id_conflict);
+        rejected ->
+            commit_with_index(Connection, RaftIndex, [], transaction_failed);
         {error, _Reason} = Error -> Error
     end.
 
@@ -238,7 +289,33 @@ record_and_apply(Connection, RaftIndex, TransactionId, CommandHash, Statements) 
          <<"INSERT INTO __erlite_transactions "
            "(transaction_id, command_hash, original_raft_index) VALUES (?, ?, ?)">>,
          [TransactionId, CommandHash, RaftIndex]},
-    commit_with_index(Connection, RaftIndex, Statements ++ [Record], applied).
+    case commit_with_index(Connection, RaftIndex, Statements ++ [Record],
+                           applied) of
+        {error, SqliteError} = Error ->
+            case deterministic_transaction_error(SqliteError) of
+                true -> record_transaction_failure(
+                          Connection, RaftIndex, TransactionId, CommandHash,
+                          SqliteError);
+                false -> Error
+            end;
+        Result -> Result
+    end.
+
+%% Only errors determined by command content or the replicated schema become
+%% durable rejections. Busy/locked, full disk, I/O, corruption, interruption,
+%% and allocation failures remain unapplied and retryable.
+deterministic_transaction_error(SqliteError) when is_integer(SqliteError) ->
+    lists:member(SqliteError band 16#ff, [1, 18, 19, 20]);
+deterministic_transaction_error(_) -> false.
+
+record_transaction_failure(Connection, RaftIndex, TransactionId, CommandHash,
+                           SqliteError) ->
+    Failure = {execute,
+               <<"INSERT OR IGNORE INTO __erlite_transaction_failures "
+                 "(transaction_id,command_hash,raft_index,sqlite_error) "
+                 "VALUES (?,?,?,?)">>,
+               [TransactionId, CommandHash, RaftIndex, SqliteError]},
+    commit_with_index(Connection, RaftIndex, [Failure], transaction_failed).
 
 advance_duplicate(Connection, RaftIndex) ->
     commit_with_index(Connection, RaftIndex, [], already_applied).
@@ -278,6 +355,8 @@ verify_format(Connection) ->
 reset_raft_history(Connection) ->
     Statements = [
         {execute, <<"DELETE FROM __erlite_transactions">>, []},
+        {execute, <<"DELETE FROM __erlite_transaction_failures">>, []},
+        {execute, <<"DELETE FROM __erlite_migration_failures">>, []},
         {execute,
          <<"UPDATE __erlite_replica_metadata "
            "SET last_applied_raft_index = 0 WHERE singleton = 1">>, []}

@@ -1030,6 +1030,8 @@ See ADR 0006.
 
 ### Phase 13 — Hardening
 
+**Status: complete**
+
 Add:
 
 - network partitions
@@ -1043,6 +1045,32 @@ Add:
 - catalog failures
 - backup corruption detection
 - observability
+
+Phase 13 consolidates the failure coverage accumulated by the real multi-node
+Common Test suites and adds explicit storage-exhaustion, failed-migration,
+release-compatibility, readiness, and metrics coverage. Network/member loss,
+successive elections, delayed SQLite application, controller and lifecycle
+crashes, verified replacement bootstrap, catalog quorum loss, and corrupt
+snapshots/backups all fail closed or reconcile from durable state.
+
+Node join now performs a release preflight before persisting cluster identity.
+Cluster protocol ranges must overlap, and command format, snapshot format, and
+SQLite runtime identity must match. Rolling upgrades are therefore supported
+only between releases that advertise compatibility; an incompatible node is
+rejected before catalog membership changes.
+
+Deterministic SQLite command failures are recorded as durable failed
+applications while atomically advancing the replica's applied index without
+committing user mutations. For migrations, schema version also remains
+unchanged and the fleet campaign durably pauses. This prevents a rejected DDL
+or ordinary constraint violation from permanently blocking later Raft
+application. Resource and I/O failures, including disk full, never advance the
+applied index and retry after the storage fault is removed.
+
+The supervised observability service exposes liveness, quorum-backed readiness,
+bounded operation counters, VM pressure, database counts, modes, and bytes.
+See `docs/hardening.md` for the failure matrix and operator expectations.
+The admission and failure policy is recorded in ADR 0007.
 
 ### Phase 14 — Scale validation
 

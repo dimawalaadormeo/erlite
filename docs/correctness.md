@@ -231,6 +231,38 @@ shared validator runs both when a migration command enters Raft and immediately
 before SQLite application; a rejected application does not change schema,
 migration history, schema version, or durable applied index.
 
+A deterministic SQLite command error after Raft commit is itself materialized
+durably. For an ordinary transaction, Erlite records the transaction ID,
+command hash, Raft index, and SQLite error while advancing
+`last_applied_raft_index` in one transaction; user mutations remain rolled
+back. Identical retries remain rejected and reuse of that ID with different
+content remains a conflict. For migration DDL, the equivalent failure record
+does not change user schema, successful migration history, or schema version.
+The request still returns failure and a failed fleet canary durably pauses.
+This prevents one rejected constraint or DDL command from poisoning all later
+Raft application. Resource, I/O, busy/locked, corruption, interruption, and
+allocation errors are different: Erlite does not record them as deterministic
+failures and never advances the applied index; application retries only after
+the underlying fault recovers.
+
+## Rolling upgrade compatibility
+
+Before `join` creates or updates local cluster metadata, the joining node asks
+the seed for release metadata. Their supported cluster-protocol ranges must
+overlap, while replicated-command format, snapshot format, and canonical
+SQLite runtime identity must match. Failure aborts before membership mutation.
+This is an admission fence, not a data conversion mechanism; a format-changing
+release requires an explicit future upgrade protocol.
+
+## Health and observability
+
+Liveness means the HTTP process can respond and is intentionally independent
+of quorum. Readiness requires every core worker and a successful consistent
+catalog query reporting at least three active catalog nodes. It therefore goes
+degraded on catalog partition or quorum loss. Metrics use a fixed atom key set;
+database IDs and other client-controlled values are never labels. Counters are
+operational hints and do not participate in replication decisions.
+
 ## External service boundary
 
 Phase 6 never exposes a plaintext listener. Enabling the HTTP service requires TLS certificate material and at least one configured bearer credential. Tokens are compared in constant time and removed from the authenticated identity before dispatch. Admin authorization is required for create, delete, and fleet listing; service identities can access only their explicit database allow-list.

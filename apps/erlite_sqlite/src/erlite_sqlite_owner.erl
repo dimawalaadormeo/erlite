@@ -51,7 +51,7 @@ schema_version(Pid) -> gen_server:call(Pid, schema_version, infinity).
 migration_history(Pid) -> gen_server:call(Pid, migration_history, infinity).
 
 -spec transaction_status(pid(), binary(), binary()) ->
-    new | duplicate | conflict | {error, term()}.
+    new | duplicate | rejected | conflict | {error, term()}.
 transaction_status(Pid, TransactionId, CommandHash) ->
     gen_server:call(Pid, {transaction_status, TransactionId, CommandHash},
                     infinity).

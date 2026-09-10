@@ -4,11 +4,13 @@
          multiple_database_lifecycle_and_isolation/1,
          catalog_lifecycle_reconciles_interrupted_work/1,
          fleet_migration_canary_batch_and_history/1,
+         fleet_migration_failure_pauses_without_schema_advance/1,
          external_api_query_transaction_and_control/1]).
 
 all() -> [multiple_database_lifecycle_and_isolation,
           catalog_lifecycle_reconciles_interrupted_work,
           fleet_migration_canary_batch_and_history,
+          fleet_migration_failure_pauses_without_schema_advance,
           external_api_query_transaction_and_control].
 
 init_per_suite(Config) ->
@@ -81,6 +83,41 @@ fleet_migration_canary_batch_and_history(Config) ->
     ok = erlite_database_lifecycle:delete(Db2),
     ok.
 
+fleet_migration_failure_pauses_without_schema_advance(Config) ->
+    Catalog = proplists:get_value(catalog, Config),
+    DatabaseId = <<"phase13-failed-canary">>,
+    ok = erlite_database_lifecycle:create(DatabaseId),
+    {ok, Controller} = case ets:lookup(erlite_database_routes, DatabaseId) of
+                           [{DatabaseId, Pid}] -> {ok, Pid};
+                           [] -> {error, missing_controller}
+                       end,
+    #{replicas := Replicas} = sys:get_state(Controller),
+    lists:foreach(
+      fun(Owner) ->
+              {ok, _} = erlite_sqlite_owner:execute(
+                          Owner, <<"CREATE TABLE collision (id INTEGER)">>, [])
+      end, maps:values(Replicas)),
+    Migrations = [#{id => <<"colliding-ddl">>, from => 0, to => 1,
+                    statements =>
+                        [{<<"CREATE TABLE collision (id INTEGER)">>, []}]}],
+    {ok, Campaign} = erlite_fleet_migrations:start(
+                       <<"failed-canary">>, Migrations,
+                       #{databases => [DatabaseId], canary_size => 1,
+                         batch_size => 1, max_retries => 1,
+                         idempotency_key => <<"phase13-failure">>}),
+    {error, {canary_failed, [{DatabaseId, {error, _}}]}} =
+        erlite_fleet_migrations:run_batch(Campaign),
+    {ok, #{status := paused}} = erlite_fleet_migrations:status(Campaign),
+    {ok, #{schema_version := 0}} = erlite_catalog:database(
+                                      Catalog, DatabaseId, 15000, consistent),
+    [Owner | _] = maps:values(Replicas),
+    {ok, 0} = erlite_sqlite_owner:schema_version(Owner),
+    {ok, #{rows := []}} = erlite_sqlite_owner:migration_history(Owner),
+    {ok, #{rows := [[1]]}} = erlite_databases:query(
+                               DatabaseId, <<"SELECT 1">>, [], 15000),
+    ok = erlite_database_lifecycle:delete(DatabaseId),
+    ok.
+
 catalog_lifecycle_reconciles_interrupted_work(Config) ->
     Catalog = proplists:get_value(catalog, Config),
     PublicDatabaseId = <<"phase5-public-api">>,
@@ -140,6 +177,11 @@ external_api_query_transaction_and_control(_Config) ->
     DatabaseId = <<"phase6-api">>,
     Admin = #{role => admin},
     Service = #{role => service, databases => [DatabaseId]},
+    {200, #{<<"status">> := <<"ready">>}} = erlite_api_handler:handle(
+                                                <<"GET">>, <<"/v1/ready">>,
+                                                #{}, undefined),
+    {200, #{<<"counters">> := _}} = erlite_api_handler:handle(
+                                      <<"GET">>, <<"/v1/metrics">>, #{}, Admin),
     {200, _} = erlite_api_handler:handle(
                  <<"POST">>, <<"/v1/databases">>,
                  #{<<"database_id">> => DatabaseId}, Admin),
@@ -221,7 +263,7 @@ multiple_database_lifecycle_and_isolation(Config) ->
     {ok, ColdStatus} = erlite_databases:status(Db1),
     cold = maps:get(mode, ColdStatus),
     0 = maps:get(open_sqlite_replicas, ColdStatus),
-    {ok, #{rows := [[3]]}} = erlite_databases:query(
+    {ok, #{rows := [[5]]}} = erlite_databases:query(
                                 Db1,
                                 <<"SELECT count(*) FROM sqlite_schema "
                                   "WHERE name LIKE '__erlite_%'">>,

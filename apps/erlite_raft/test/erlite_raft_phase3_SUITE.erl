@@ -62,6 +62,13 @@ single_database_high_availability(Config) ->
 
     {ok, _} = erlite_raft_database:write(
                 Members, command(<<"tx-1">>, 1, <<"one">>), Replicas, 15000),
+    {error, {transaction_rejected, <<"tx-constraint">>}} =
+        erlite_raft_database:write(
+          Members, command(<<"tx-constraint">>, 1, <<"duplicate-id">>),
+          Replicas, 15000),
+    {ok, _} = erlite_raft_database:write(
+                Members, command(<<"tx-after-rejection">>, 30, <<"after">>),
+                Replicas, 15000),
     [{ok, ready, _} = erlite_raft_database:readiness(
                          Members, Replicas, Member, 15000)
      || Member <- Members],
@@ -87,13 +94,17 @@ single_database_high_availability(Config) ->
     {ok, _} = erlite_raft_database:write(
                 Members -- [Leader1], command(<<"tx-3">>, 3, <<"three">>),
                 Replicas, 15000),
-    {ok, #{rows := [[3]]}} = erlite_raft_database:consistent_read(
+    {ok, #{rows := [[4]]}} = erlite_raft_database:consistent_read(
                                 Members -- [Leader1],
                                 <<"SELECT count(*) FROM items">>, [],
                                 Replicas, 15000),
     ok = restart_server(Leader1),
     {ok, ready, _} = erlite_raft_database:readiness(
                        Members, Replicas, Leader1, 15000),
+
+    %% Exercise successive elections, rather than assuming recovery after one
+    %% leader loss implies recovery after repeated failures.
+    ok = repeat_leader_failures(Members, Replicas, 20, 2),
 
     {ok, DelayedIndex, _} = erlite_raft_cluster:submit(
                               Members, command(<<"tx-4">>, 4, <<"four">>),
@@ -120,7 +131,7 @@ single_database_high_availability(Config) ->
         erlite_raft_database:write(
           Members, command(<<"tx-1">>, 10, <<"different">>),
           Replicas, 15000),
-    {ok, #{rows := [[4]]}} = erlite_raft_database:consistent_read(
+    {ok, #{rows := [[7]]}} = erlite_raft_database:consistent_read(
                                 Members, <<"SELECT count(*) FROM items">>, [],
                                 Replicas, 15000),
 
@@ -145,7 +156,7 @@ single_database_high_availability(Config) ->
     %% The timed-out command may commit after quorum returns; timeout is an
     %% ambiguous result, never permission to submit a different transaction
     %% under the same transaction id.
-    {ok, #{rows := [[6]]}} = erlite_raft_database:consistent_read(
+    {ok, #{rows := [[9]]}} = erlite_raft_database:consistent_read(
                                 [CurrentLeader, Minority1],
                                 <<"SELECT count(*) FROM items">>, [],
                                 Replicas, 15000),
@@ -199,6 +210,20 @@ command(TransactionId, Id, Value) ->
                       [{<<"INSERT INTO items (id, value) VALUES (?, ?)">>,
                         [Id, Value]}]),
     Command.
+
+repeat_leader_failures(_Members, _Replicas, _Id, 0) -> ok;
+repeat_leader_failures(Members, Replicas, Id, Remaining) ->
+    {ok, _Barrier, Leader} = erlite_raft_cluster:barrier(Members, 15000),
+    Survivors = Members -- [Leader],
+    ok = stop_server(Leader),
+    {ok, _} = erlite_raft_database:write(
+                Survivors,
+                command(integer_to_binary(Id), Id, <<"re-election">>),
+                Replicas, 15000),
+    ok = restart_server(Leader),
+    {ok, ready, _} = erlite_raft_database:readiness(
+                       Members, Replicas, Leader, 15000),
+    repeat_leader_failures(Members, Replicas, Id + 1, Remaining - 1).
 
 stop_peer(Peer) ->
     try peer:stop(Peer) of

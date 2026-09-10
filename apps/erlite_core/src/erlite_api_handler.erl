@@ -6,14 +6,28 @@
 -define(MAX_TIMEOUT, 60000).
 
 handle(Method, Path, Body, Identity) ->
-    try route(Method, split_path(Path), Body, Identity)
+    Started = erlang:monotonic_time(microsecond),
+    Result = try route(Method, split_path(Path), Body, Identity)
     catch
         error:{badkey, Key} -> response(400, {missing_field, Key});
-        error:badarg -> response(400, invalid_request)
-    end.
+        error:badarg -> response(400, invalid_request);
+        error:{badmap, _} -> response(400, invalid_request);
+        error:{bad_generator, _} -> response(400, invalid_request)
+    end,
+    observe_request(Result, Started),
+    Result.
 
 route(<<"GET">>, [<<"v1">>, <<"health">>], _Body, _Identity) ->
     {200, #{<<"status">> => <<"ok">>}};
+route(<<"GET">>, [<<"v1">>, <<"ready">>], _Body, _Identity) ->
+    Health = erlite_observability:health(),
+    case maps:get(status, Health) of
+        ready -> {200, json_value(Health)};
+        _ -> {503, json_value(Health)}
+    end;
+route(<<"GET">>, [<<"v1">>, <<"metrics">>], _Body, Identity) ->
+    with_auth(Identity, control, undefined,
+              fun() -> {200, json_value(erlite_observability:snapshot())} end);
 route(<<"GET">>, [<<"v1">>, <<"databases">>], _Body, Identity) ->
     with_auth(Identity, control, undefined,
       fun() ->
@@ -147,3 +161,14 @@ json_value(Value) -> iolist_to_binary(io_lib:format("~tp", [Value])).
 json_key(Key) when is_binary(Key) -> Key;
 json_key(Key) when is_atom(Key) -> atom_to_binary(Key);
 json_key(Key) -> iolist_to_binary(io_lib:format("~tp", [Key])).
+
+observe_request({Status, _}, Started) ->
+    erlite_observability:record(api_requests_total),
+    erlite_observability:record(api_request_duration_microseconds,
+                                max(1, erlang:monotonic_time(microsecond) - Started)),
+    case Status >= 500 of
+        true -> erlite_observability:record(api_server_errors_total);
+        false when Status >= 400 ->
+            erlite_observability:record(api_client_errors_total);
+        false -> ok
+    end.

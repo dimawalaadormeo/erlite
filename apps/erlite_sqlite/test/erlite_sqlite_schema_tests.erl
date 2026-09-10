@@ -36,7 +36,7 @@ apply_and_duplicate_delivery_test() ->
               Connection
       end).
 
-failed_apply_does_not_advance_index_or_commit_partial_work_test() ->
+deterministic_failed_apply_advances_index_without_partial_work_test() ->
     with_database(
       fun(_Path, Connection) ->
               ok = erlite_sqlite_schema:initialize(Connection),
@@ -48,9 +48,9 @@ failed_apply_does_not_advance_index_or_commit_partial_work_test() ->
                   {execute, <<"INSERT INTO values_table(value) VALUES (?)">>, [<<"same">>]},
                   {execute, <<"INSERT INTO values_table(value) VALUES (?)">>, [<<"same">>]}
               ],
-              ?assertMatch({error, _},
+              ?assertEqual({ok, transaction_failed},
                            apply(Connection, 0, 1, <<"tx-1">>, <<"bad">>, Statements)),
-              ?assertEqual({ok, 0}, erlite_sqlite_schema:last_applied_index(Connection)),
+              ?assertEqual({ok, 1}, erlite_sqlite_schema:last_applied_index(Connection)),
               ?assertMatch({ok, #{rows := [[0]]}},
                            erlite_sqlite:query(Connection,
                                                <<"SELECT count(*) FROM values_table">>,
@@ -189,6 +189,88 @@ unsafe_migration_is_rejected_before_sqlite_state_changes_test() ->
                          Connection,
                          <<"SELECT name FROM sqlite_schema WHERE name='poisoned'">>,
                          [])),
+          Connection
+      end).
+
+disk_full_does_not_advance_applied_index_test() ->
+    Path = temporary_database_path(),
+    ok = erlite_sqlite_disk_full_adapter:fail_transactions(false),
+    {ok, Connection} = erlite_sqlite:open(
+                         Path, #{adapter => erlite_sqlite_disk_full_adapter}),
+    try
+        ok = erlite_sqlite_schema:initialize(Connection),
+        {ok, _} = erlite_sqlite:execute(
+                    Connection, <<"CREATE TABLE disk_test (value TEXT)">>, []),
+        ok = erlite_sqlite_disk_full_adapter:fail_transactions(true),
+        ?assertEqual({error, enospc},
+                     apply(Connection, 0, 1, <<"disk-full">>, <<"disk-full">>,
+                           [{execute,
+                             <<"INSERT INTO disk_test(value) VALUES (?)">>,
+                             [<<"not-committed">>]}])),
+        ?assertEqual({ok, 0}, erlite_sqlite_schema:last_applied_index(Connection)),
+        ?assertMatch({ok, #{rows := [[0]]}},
+                     erlite_sqlite:query(
+                       Connection, <<"SELECT count(*) FROM disk_test">>, []))
+    after
+        ok = erlite_sqlite_disk_full_adapter:fail_transactions(false),
+        ok = erlite_sqlite:close(Connection),
+        ok = delete_if_present(Path),
+        ok = delete_if_present(Path ++ "-shm"),
+        ok = delete_if_present(Path ++ "-wal")
+    end.
+
+deterministic_migration_failure_is_durably_skipped_test() ->
+    with_database(
+      fun(_Path, Connection) ->
+          ok = erlite_sqlite_schema:initialize(Connection),
+          {ok, _} = erlite_sqlite:execute(
+                      Connection, <<"CREATE TABLE collision (id INTEGER)">>, []),
+          ?assertEqual(
+             {ok, migration_failed},
+             erlite_sqlite_schema:apply_migration(
+               Connection, 0, 1, <<"app">>, <<"collision">>,
+               hash(<<"collision">>), 0, 1,
+               [{execute, <<"CREATE TABLE collision (id INTEGER)">>, []}])),
+          ?assertEqual({ok, 1},
+                       erlite_sqlite_schema:last_applied_index(Connection)),
+          ?assertEqual({ok, 0}, erlite_sqlite_schema:schema_version(Connection)),
+          ?assertMatch({ok, #{rows := []}},
+                       erlite_sqlite_schema:migration_history(Connection)),
+          Connection
+      end).
+
+deterministic_write_failure_does_not_poison_later_entries_test() ->
+    with_database(
+      fun(_Path, Connection) ->
+          ok = erlite_sqlite_schema:initialize(Connection),
+          {ok, _} = erlite_sqlite:execute(
+                      Connection,
+                      <<"CREATE TABLE unique_values (value TEXT UNIQUE)">>, []),
+          {ok, _} = erlite_sqlite:execute(
+                      Connection,
+                      <<"INSERT INTO unique_values(value) VALUES (?)">>,
+                      [<<"same">>]),
+          RejectedHash = hash(<<"rejected">>),
+          ?assertEqual(
+             {ok, transaction_failed},
+             erlite_sqlite_schema:apply_committed(
+               Connection, 0, 1, <<"rejected">>, RejectedHash, 0,
+               [{execute,
+                 <<"INSERT INTO unique_values(value) VALUES (?)">>,
+                 [<<"same">>]}])),
+          ?assertEqual(rejected, erlite_sqlite_schema:transaction_status(
+                                   Connection, <<"rejected">>, RejectedHash)),
+          ?assertEqual({ok, 1},
+                       erlite_sqlite_schema:last_applied_index(Connection)),
+          ?assertEqual(
+             {ok, applied},
+             apply(Connection, 1, 2, <<"later">>, <<"later">>,
+                   [{execute,
+                     <<"INSERT INTO unique_values(value) VALUES (?)">>,
+                     [<<"later">>]}])),
+          ?assertMatch({ok, #{rows := [[2]]}},
+                       erlite_sqlite:query(
+                         Connection, <<"SELECT count(*) FROM unique_values">>, [])),
           Connection
       end).
 
