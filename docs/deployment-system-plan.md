@@ -1,7 +1,11 @@
 # Erlite Deployment System — Plan
 
-Status: proposed, not yet implemented. Written as an implementation-ready spec
-so either Claude or Codex can build it without further design discussion.
+Status: build order steps 1-3 and 7 are implemented, in `tools/erlite-deploy/`
+(Go, single binary: `config`/`validate`/`generate`/`questions`, the `docker`/
+`podman`/`server` generators, the shared `DEPLOY_GUIDE.md` renderer, and the
+model-agnostic `ai/AI_GUIDE.md` covering both AI modes). Steps 4-6 and 8
+(Kubernetes, Proxmox, the web GUI, `autoBootstrap` execution) are not yet
+built -- see `tools/erlite-deploy/README.md` for current status.
 
 ## 1. Problem
 

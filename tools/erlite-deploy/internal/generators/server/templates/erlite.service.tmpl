@@ -1,0 +1,17 @@
+[Unit]
+Description=Erlite node ({{.ClusterName}})
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=erlite
+Group=erlite
+EnvironmentFile=/etc/erlite/erlite.env
+ExecStart=/opt/erlite/bin/erlite foreground
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
