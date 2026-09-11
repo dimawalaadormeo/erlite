@@ -1074,6 +1074,13 @@ The admission and failure policy is recorded in ADR 0007.
 
 ### Phase 14 — Scale validation
 
+**Status: in progress**
+
+The opt-in local RF=3 resource and latency gate is implemented, and its 1,000,
+5,000, and 10,000 milestones passed on the documented reference host. Final
+acceptance still requires the distributed failover, catch-up, rebalance, CPU,
+and network measurements defined in `docs/scale-validation.md`.
+
 Test progressively:
 
 - 1,000 DBs

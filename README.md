@@ -6,8 +6,10 @@ SQLite databases across a cluster. Each database is an independent RabbitMQ
 databases across Erlite nodes.
 
 Development follows the phased plan in
-[`ERLITE_PROJECT.md`](ERLITE_PROJECT.md). Phases 0 through 13 are complete; the
-next roadmap item is scale validation.
+[`ERLITE_PROJECT.md`](ERLITE_PROJECT.md). Phases 0 through 13 are complete;
+Phase 14 scale validation is in progress with a reproducible opt-in local gate.
+The staged commands and distributed acceptance requirements are in
+[`docs/scale-validation.md`](docs/scale-validation.md).
 
 ## Current capabilities
 
@@ -34,6 +36,25 @@ next roadmap item is scale validation.
 Erlite scales across independent databases. It does not make one SQLite
 database horizontally multi-writer, provide cross-database transactions, or
 act as a general-purpose distributed SQL engine.
+
+## Phase 14 scale results
+
+The local RF=3 scale gate passed at 1,000, 5,000, and 10,000 databases on
+September 11, 2026. Each database used three real Ra members and three SQLite
+replicas in one Erlang VM. Each tier completed all lifecycle creates, 100
+sampled consistent queries, and durable lifecycle cleanup.
+
+| Databases | VM memory growth | Memory per DB | Processes | File descriptors | Disk growth | Provision mean | Query mean |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1,000 | 576 MB | 576 KB | 13,000 | 3,001 | 137 MB | 64.2 ms | 0.313 ms |
+| 5,000 | 2.67 GB | 535 KB | 65,000 | 15,024 | 684 MB | 71.0 ms | 0.257 ms |
+| 10,000 | 5.23 GB | 523 KB | 130,000 | 30,067 | 1.37 GB | 80.5 ms | 0.328 ms |
+
+These are single-host validation results, not production capacity claims.
+Multi-host committed-write, network, failover, follower catch-up, and
+rebalancing measurements remain pending. Hardware, percentile results,
+methodology, reproduction commands, and acceptance criteria are documented in
+[`docs/scale-validation.md`](docs/scale-validation.md).
 
 ## Correctness model
 
