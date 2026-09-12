@@ -40,7 +40,8 @@ checkpoint_prunes_only_entries_covered_by_verified_manifests_test() ->
     Manifests = #{{replica, node()} => "/snapshots/at-two.manifest"},
     {State3, {checkpointed, 2}, [{release_cursor, 5, State3}]} =
         erlite_raft_machine:apply(
-          #{index => 5, term => 1}, {checkpoint, 2, Manifests}, State2),
+          #{index => 5, term => 1},
+          {checkpoint, 2, Manifests, maps:keys(Manifests)}, State2),
     ?assertEqual([{4, 1, command(<<"tx-2">>, 2)}],
                  erlite_raft_machine:entries_after(State3, 2)),
     ?assertEqual({snapshot_required, "/snapshots/at-two.manifest"},
@@ -49,6 +50,18 @@ checkpoint_prunes_only_entries_covered_by_verified_manifests_test() ->
     ?assertEqual({ok, [{4, 1, command(<<"tx-2">>, 2)}]},
                  erlite_raft_machine:recovery_after(
                    2, {replica, node()}, State3)).
+
+checkpoint_rejects_incomplete_manifest_set_test() ->
+    State0 = erlite_raft_machine:init(#{runtime_identity => runtime_identity()}),
+    {State1, _, _} = erlite_raft_machine:apply(
+                       #{index => 2, term => 1}, command(<<"tx">>, 1), State0),
+    Manifests = #{{replica, node()} => "/snapshots/one.manifest"},
+    ?assertEqual(
+       {State1, {error, incomplete_checkpoint_manifests}},
+       erlite_raft_machine:apply(
+         #{index => 3, term => 1},
+         {checkpoint, 2, Manifests,
+          [{replica, node()}, {missing_replica, node()}]}, State1)).
 
 command(TransactionId, Id) ->
     {ok, Command} = erlite_raft_command:new_transaction(

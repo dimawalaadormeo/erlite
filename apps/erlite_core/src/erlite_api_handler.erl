@@ -141,8 +141,23 @@ result({ok, Value}) -> {200, #{<<"result">> => json_value(Value)}};
 result({timeout, Reason}) -> response(504, Reason);
 result({error, database_not_found}) -> response(404, database_not_found);
 result({error, database_exists}) -> response(409, database_exists);
-result({error, Reason}) -> response(409, Reason);
+result({error, Reason}) -> response(error_status(Reason), Reason);
 result(Other) -> response(500, {unexpected_result, Other}).
+
+error_status({stale_generation, _, _}) -> 409;
+error_status({movement_in_progress, _}) -> 409;
+error_status({repair_in_progress, _}) -> 409;
+error_status({migration_in_progress, _}) -> 409;
+error_status({database_not_ready, _}) -> 409;
+error_status(transaction_id_conflict) -> 409;
+error_status(migration_id_conflict) -> 409;
+error_status(Reason) when Reason =:= invalid_database_id;
+                          Reason =:= invalid_database_options;
+                          Reason =:= invalid_database_operation;
+                          Reason =:= invalid_database_move;
+                          Reason =:= invalid_database_restore;
+                          Reason =:= unsafe_query -> 400;
+error_status(_) -> 500.
 
 response(Status, Reason) ->
     {Status, #{<<"error">> => json_value(Reason)}}.

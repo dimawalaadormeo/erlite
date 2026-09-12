@@ -45,12 +45,12 @@ fi
 
 mkdir -p /etc/erlite
 cat > /etc/erlite/erlite.env <<EOF
-NODE_NAME=$NODE_NAME
-CLUSTER_NAME=$CLUSTER_NAME
-STORAGE_PATH=$STORAGE_PATH
-REPLICATION_FACTOR=$REPLICATION_FACTOR
-SEED_NODES={{.SeedNodesEnv}}
-API_PORT=$API_PORT
+ERLITE_NODE_NAME=$NODE_NAME
+ERLITE_CLUSTER_NAME=$CLUSTER_NAME
+ERLITE_STORAGE_PATH=$STORAGE_PATH
+ERLITE_REPLICATION_FACTOR=$REPLICATION_FACTOR
+ERLITE_SEED_NODES={{.SeedNodesEnv}}
+ERLITE_API_PORT=$API_PORT
 EOF
 chmod 0640 /etc/erlite/erlite.env
 chown root:erlite /etc/erlite/erlite.env
@@ -66,7 +66,7 @@ if command -v ufw >/dev/null 2>&1; then
   ufw allow {{.DistPortRangeUfw}}/tcp
 elif command -v firewall-cmd >/dev/null 2>&1; then
   firewall-cmd --permanent --add-port="$API_PORT"/tcp
-  firewall-cmd --permanent --add-port={{.DistPortRangeUfw}}/tcp
+  firewall-cmd --permanent --add-port={{.DistPortRangeFirewalld}}/tcp
   firewall-cmd --reload
 fi
 {{- end}}

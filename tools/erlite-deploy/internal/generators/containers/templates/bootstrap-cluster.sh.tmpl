@@ -12,7 +12,7 @@ echo "==> Initializing cluster on seed node {{.SeedNode.Name}}"
 
 {{range .OtherNodes}}
 echo "==> Joining {{.Name}}"
-"$ENGINE" exec "erlite-{{.Name}}" erlite join {{$.SeedNode.Name}}
+"$ENGINE" exec "erlite-{{.Name}}" erlite join {{$.SeedNode.Name}}@{{$.SeedNode.Name}}
 {{- end}}
 
 echo "==> Waiting for every node to report ready"

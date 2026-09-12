@@ -29,6 +29,10 @@ func WriteAll(files []File, dir string) error {
 		return fmt.Errorf("creating output directory %s: %w", dir, err)
 	}
 	for _, f := range files {
+		if f.Name == "" || f.Name == ".." || filepath.IsAbs(f.Name) ||
+			filepath.Clean(f.Name) != f.Name || strings.HasPrefix(f.Name, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("unsafe artifact path %q", f.Name)
+		}
 		path := filepath.Join(dir, f.Name)
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return fmt.Errorf("creating directory for %s: %w", f.Name, err)

@@ -11,12 +11,12 @@ services:
     container_name: erlite-{{.Name}}
     hostname: {{.Name}}
     environment:
-      NODE_NAME: "{{.Name}}@{{.Name}}"
-      CLUSTER_NAME: "{{$.Config.ClusterName}}"
-      STORAGE_PATH: "{{$.Config.StoragePath}}"
-      REPLICATION_FACTOR: "{{$.Config.ReplicationFactor}}"
-      SEED_NODES: "{{$.SeedNodesEnv}}"
-      API_PORT: "{{$.Config.APIPort}}"
+      ERLITE_NODE_NAME: "{{.Name}}@{{.Name}}"
+      ERLITE_CLUSTER_NAME: "{{$.Config.ClusterName}}"
+      ERLITE_STORAGE_PATH: "{{$.Config.StoragePath}}"
+      ERLITE_REPLICATION_FACTOR: "{{$.Config.ReplicationFactor}}"
+      ERLITE_SEED_NODES: "{{$.SeedNodesEnv}}"
+      ERLITE_API_PORT: "{{$.Config.APIPort}}"
     volumes:
       - {{.Name}}-data:{{$.Config.StoragePath}}
     ports:

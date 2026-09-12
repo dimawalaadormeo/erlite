@@ -1,6 +1,7 @@
 package generate
 
 import (
+	"strings"
 	"testing"
 
 	"erlite-deploy/internal/config"
@@ -79,6 +80,21 @@ func TestRunDockerGeneratesGuideAndExpectedFiles(t *testing.T) {
 	for _, f := range files {
 		if _, ok := want[f.Name]; ok {
 			want[f.Name] = true
+		}
+		if f.Name == "docker-compose.yml" {
+			body := string(f.Content)
+			if !strings.Contains(body, `ERLITE_NODE_NAME: "a@a"`) ||
+				!strings.Contains(body, `ERLITE_SEED_NODES: "a@a,b@b,c@c"`) {
+				t.Errorf("container node identities are inconsistent:\n%s", body)
+			}
+		}
+		if f.Name == "bootstrap-cluster.sh" &&
+			!strings.Contains(string(f.Content), "erlite join a@a") {
+			t.Errorf("bootstrap join does not use a distributed node name:\n%s", f.Content)
+		}
+		if f.Name == "tls-gen.sh" &&
+			!strings.Contains(string(f.Content), "subjectAltName=") {
+			t.Error("generated certificates are missing SAN extensions")
 		}
 	}
 	for name, found := range want {

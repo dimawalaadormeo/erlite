@@ -128,7 +128,7 @@ same source (`internal/config/questions.go`):
    - Print the finished config as a JSON code block.
    - Tell the user the exact command to run it themselves:
      ```
-     erlite-deploy generate --config erlite-deploy.config.json --target <target> --out ./out
+     erlite-deploy generate --config erlite-deploy.config.json --out ./out
      ```
    - Say plainly that this requires the `erlite-deploy` binary on their
      machine, since you have no way to check whether they have it or fetch

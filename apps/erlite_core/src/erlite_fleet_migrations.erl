@@ -113,10 +113,9 @@ execute_selected(Campaign, Catalog) ->
     Limit = case CanaryDone of true -> maps:get(batch_size, Campaign);
                                 false -> CanarySize end,
     Selected = lists:sublist(Eligible, Limit),
-    Results = [execute_database(Db, Campaign, Catalog) || Db <- Selected],
-    case {CanaryDone, lists:any(fun({_, {error, _}}) -> true;
-                                  ({_, _}) -> false end,
-                                Results)} of
+    Results = [execute_database(Db, maps:get(Db, Entries), Campaign, Catalog)
+               || Db <- Selected],
+    case {CanaryDone, lists:any(fun result_failed/1, Results)} of
         {false, true} ->
             _ = erlite_catalog:set_migration_campaign_state(
                   Catalog, maps:get(campaign_id, Campaign), paused, ?TIMEOUT),
@@ -124,16 +123,25 @@ execute_selected(Campaign, Catalog) ->
         _ -> {ok, Results}
     end.
 
+result_failed({_DatabaseId, ok}) -> false;
+result_failed({_DatabaseId, _Failure}) -> true.
+
 eligible(#{status := complete}, _) -> false;
 eligible(#{attempts := Attempts}, Max) -> Attempts =< Max.
 
-execute_database(DatabaseId, Campaign, Catalog) ->
+execute_database(DatabaseId, Entry, Campaign, Catalog) ->
     Result = migrate_chain(DatabaseId, maps:get(campaign_id, Campaign),
                            maps:get(migration_set, Campaign),
                            maps:get(migrations, Campaign), Catalog),
-    Recorded = case Result of ok -> ok; {error, Reason} -> {error, Reason} end,
+    Recorded = case Result of
+                   ok -> ok;
+                   {error, Reason} -> {error, Reason};
+                   {timeout, _} = Timeout -> {error, Timeout};
+                   Other -> {error, {unexpected_migration_result, Other}}
+               end,
     _ = erlite_catalog:record_migration_result(
-          Catalog, maps:get(campaign_id, Campaign), DatabaseId, Recorded,
+          Catalog, maps:get(campaign_id, Campaign), DatabaseId,
+          maps:get(attempts, Entry) + 1, Recorded,
           ?TIMEOUT),
     {DatabaseId, Result}.
 

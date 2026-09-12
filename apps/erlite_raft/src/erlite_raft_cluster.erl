@@ -36,11 +36,21 @@ submit(ServerId, Command, Timeout) ->
 -spec checkpoint(term(), non_neg_integer(), map(), timeout()) ->
     {ok, non_neg_integer(), term()} | {error, term()} | {timeout, term()}.
 checkpoint(ServerId, ThroughIndex, Manifests, Timeout) ->
-    case ra:process_command(
-           ServerId, {checkpoint, ThroughIndex, Manifests}, Timeout) of
-        {ok, {checkpointed, ThroughIndex}, Leader} ->
-            {ok, ThroughIndex, Leader};
-        {ok, {error, _Reason} = Error, _Leader} -> Error;
+    case ra:members(ServerId, Timeout) of
+        {ok, Members, _MembershipLeader} ->
+            case lists:sort(Members) =:= lists:sort(maps:keys(Manifests)) of
+                true ->
+                    case ra:process_command(
+                           ServerId,
+                           {checkpoint, ThroughIndex, Manifests, Members},
+                           Timeout) of
+                        {ok, {checkpointed, ThroughIndex}, Leader} ->
+                            {ok, ThroughIndex, Leader};
+                        {ok, {error, _Reason} = Error, _CommandLeader} -> Error;
+                        Other -> Other
+                    end;
+                false -> {error, incomplete_checkpoint_manifests}
+            end;
         Other -> Other
     end.
 

@@ -80,10 +80,16 @@ func runValidate(args []string) error {
 	errs := cfg.Validate()
 
 	if *jsonOut {
-		return printJSON(map[string]any{
+		if err := printJSON(map[string]any{
 			"valid":  len(errs) == 0,
 			"errors": errs,
-		})
+		}); err != nil {
+			return err
+		}
+		if len(errs) != 0 {
+			return fmt.Errorf("configuration is invalid")
+		}
+		return nil
 	}
 	if len(errs) == 0 {
 		fmt.Println("valid")
@@ -115,14 +121,16 @@ func runGenerate(args []string) error {
 	}
 	if errs := cfg.Validate(); len(errs) > 0 {
 		if *jsonOut {
-			_ = printJSON(map[string]any{"valid": false, "errors": errs})
+			if err := printJSON(map[string]any{"valid": false, "errors": errs}); err != nil {
+				return err
+			}
 		} else {
 			fmt.Printf("%d problem(s) found, not generating:\n", len(errs))
 			for _, e := range errs {
 				fmt.Println(" -", e)
 			}
 		}
-		os.Exit(1)
+		return fmt.Errorf("configuration is invalid")
 	}
 
 	files, err := generate.Run(cfg)

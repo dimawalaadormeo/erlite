@@ -132,10 +132,19 @@ reset_raft_history_preserves_user_data_and_clears_source_ledger_test() ->
                                 [{execute,
                                   <<"INSERT INTO restored VALUES (?)">>,
                                   [<<"kept">>]}]),
+              MigrationHash = hash(<<"old-migration">>),
+              {ok, applied} = erlite_sqlite_schema:apply_migration(
+                                Connection, 7, 8, <<"app">>, <<"old">>,
+                                MigrationHash, 0, 1,
+                                [{execute,
+                                  <<"CREATE TABLE old_migration (id INTEGER)">>,
+                                  []}]),
               ok = erlite_sqlite_schema:reset_raft_history(Connection),
               {ok, 0} = erlite_sqlite_schema:last_applied_index(Connection),
               new = erlite_sqlite_schema:transaction_status(
                       Connection, <<"old-tx">>, hash(<<"old">>)),
+              new = erlite_sqlite_schema:migration_status(
+                      Connection, <<"app">>, <<"old">>, MigrationHash),
               {ok, #{rows := [[<<"kept">>]]}} = erlite_sqlite:query(
                                                     Connection,
                                                     <<"SELECT value FROM restored">>,

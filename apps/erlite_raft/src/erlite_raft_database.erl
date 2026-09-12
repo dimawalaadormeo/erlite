@@ -44,12 +44,15 @@ transaction_status(Owner, Command, CommittedIndex) ->
     end.
 
 migration_status(Owner, Command, CommittedIndex) ->
-    Target = erlite_raft_command:target_schema_version(Command),
-    case erlite_sqlite_owner:schema_version(Owner) of
-        {ok, Version} when Version >= Target ->
-            {ok, CommittedIndex};
-        {ok, Version} -> {error, {migration_not_applied, Version}};
-        Error -> Error
+    Set = erlite_raft_command:migration_set(Command),
+    MigrationId = erlite_raft_command:migration_id(Command),
+    Hash = erlite_raft_command:hash(Command),
+    case erlite_sqlite_owner:migration_status(Owner, Set, MigrationId, Hash) of
+        duplicate -> {ok, CommittedIndex};
+        conflict -> {error, {migration_id_conflict, Set, MigrationId}};
+        rejected -> {error, {migration_rejected, Set, MigrationId}};
+        new -> {error, {migration_not_applied, Set, MigrationId}};
+        {error, _Reason} = Error -> Error
     end.
 
 -spec consistent_read(term(), binary(), list(), replicas(), timeout()) ->

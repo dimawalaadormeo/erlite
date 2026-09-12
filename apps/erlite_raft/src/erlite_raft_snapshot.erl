@@ -102,13 +102,19 @@ verify_backup(ManifestPath) ->
 -spec restore_as(file:filename_all(), binary(), file:filename_all()) ->
     ok | {error, term()}.
 restore_as(StorageRoot, TargetDatabaseId, ManifestPath) ->
-    case verify_backup(ManifestPath) of
-        {ok, _Manifest, Image} ->
-            case erlite_sqlite_database:path(StorageRoot, TargetDatabaseId) of
-                {ok, Destination} -> restore_verified_as(Image, Destination);
+    case erlite_sqlite_databases:close(StorageRoot, TargetDatabaseId) of
+        ok ->
+            case verify_backup(ManifestPath) of
+                {ok, _Manifest, Image} ->
+                    case erlite_sqlite_database:path(StorageRoot,
+                                                     TargetDatabaseId) of
+                        {ok, Destination} ->
+                            restore_verified_as(Image, Destination);
+                        Error -> Error
+                    end;
                 Error -> Error
             end;
-        Error -> Error
+        {error, _Reason} = Error -> Error
     end.
 
 restore_verified_as(Image, Destination) ->
@@ -430,7 +436,7 @@ wait_sync(Port, Output) ->
         {Port, {exit_status, 0}} -> ok;
         {Port, {exit_status, Status}} ->
             {error, {sync_failed, Status, Output}}
-    after 5000 ->
+    after application:get_env(erlite_raft, directory_sync_timeout_ms, 30000) ->
         _ = port_close(Port),
         {error, sync_timeout}
     end.
@@ -451,6 +457,6 @@ checksum(Path) ->
     end.
 
 snapshot_base(DatabaseId, Generation, Index) ->
-    Digest = binary:encode_hex(crypto:hash(sha256, DatabaseId), lowercase),
+    Digest = erlite_sqlite_database:digest(DatabaseId),
     binary_to_list(Digest) ++ "-" ++ integer_to_list(Generation) ++ "-" ++
         integer_to_list(Index).

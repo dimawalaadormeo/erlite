@@ -70,6 +70,21 @@ The machine accepts a pruning checkpoint only after the coordinator has caught u
 
 ## SQLite snapshot recovery and divergence
 
+Checkpoint publication requires a verified manifest for every member returned
+by the Ra group at publication time. The member set is carried in the
+checkpoint command and must exactly match the manifest keys before retained
+commands are pruned, so a partial caller-provided replica map cannot remove a
+member's only recovery path.
+
+Offline restore closes any registered SQLite owner before atomically replacing
+the database image. A live file descriptor is therefore never left serving a
+renamed, obsolete image through the supported snapshot API.
+
+Offline restore also clears transaction, migration, and deterministic-failure
+ledgers whose rows refer to source Raft indexes. User tables and the resulting
+schema version are preserved, while the imported replica begins with an
+applied index of zero under its new Raft history.
+
 A snapshot is usable only when its manifest format, database identity, placement generation, minimum Raft position, SQLite runtime identity, safe image basename, SHA-256 checksum, and internal durable applied index all verify. A checksum, runtime, or metadata mismatch marks the artifact incompatible; it is never activated. The snapshotted transaction registry preserves logical-write deduplication after installation.
 
 Snapshot creation is serialized by the database owner and uses SQLite's `VACUUM INTO` to obtain a consistent standalone image. Installation first copies the verified image to a uniquely named file in the destination directory, syncs it, closes any registered owner, and atomically renames it over the inactive database path. WAL sidecars from the prior image are removed only after activation. Replay then starts strictly after the snapshot's durable applied index.
@@ -114,11 +129,11 @@ Deletion reconciliation never interprets an empty local controller registry as p
 
 Database routing is authorized by a consistent read of the catalog on every resolution. Only a `ready` record may produce a route; `creating`, `deleting`, and `tombstoned` records fail closed and evict any local cached route. A missing or unavailable catalog is never replaced by cached authorization. The local routing cache therefore cannot extend the lifetime of a route beyond its authoritative catalog state.
 
-Leader discovery begins from the replica set returned by that consistent lookup. A reported leader is accepted only if it appears in both Ra's current membership response and the catalog replica set. Cached updates carry the catalog-configuration epoch and record generation; delayed updates from a previous configuration are discarded, and an older generation cannot replace a newer cached generation.
+Leader discovery begins from the replica set returned by that consistent lookup. A reported leader is accepted only if it appears in both Ra's current membership response and the catalog replica set. Cached updates carry the catalog-configuration epoch and record generation; delayed updates from a previous configuration are discarded, an older generation cannot replace a newer cached generation, and a same-generation route-only lookup cannot erase an already discovered leader.
 
 ## Durable database movement
 
-Phase 7 movement starts by durably recording a single operation-ID-fenced source and replacement on an otherwise ready database. The authoritative RF=3 replica set is not changed during the `adding` phase. A quorum barrier first fixes the source SQLite applied index. A snapshot binds that index, Ra term, database ID, placement generation, schema version, checksum, and SQLite runtime identity; its image and manifest are synced on the target and verified before installation. The replacement Ra server is then added and must catch up both Ra state and SQLite through a fresh quorum barrier before the catalog can transition to `removing`.
+Phase 7 movement starts by durably recording a single operation-ID-fenced source and replacement on an otherwise ready database. The authoritative RF=3 catalog replica set is not changed during the `adding` phase. A quorum barrier first fixes the source SQLite applied index. A snapshot binds that index, Ra term, database ID, placement generation, schema version, checksum, and SQLite runtime identity; its image and manifest are synced on the target and verified before installation. The replacement Ra server is then added to transitional Ra membership and must catch up both Ra state and SQLite through a fresh quorum barrier before the catalog can transition to `removing`. If readiness verification fails, Erlite removes the unready replacement from Ra membership; a failed rollback is surfaced explicitly and remains fenced for reconciliation.
 
 Source removal is allowed only from `removing`. An ambiguous add or remove result is reconciled against Ra's committed membership before retry. The old SQLite replica is deleted only after Ra reports the source absent. Placement substitution and generation advancement occur only afterward. Every catalog transition is idempotent, incomplete movement is returned for reconciliation, and a target must be an active catalog node whose Ra server ID is unused. Delete is fenced while a move is incomplete. Controller reconstruction accepts only the old RF=3 set, the temporary four-member set, or the final RF=3 replacement set and derives stable storage roots for both original and replacement replicas. Consequently a crash cannot make an unverified replacement authoritative, silently overlap two movements, race physical deletion, or resurrect a removed source as a blank replica.
 
@@ -130,6 +145,10 @@ The catalog durably stores the failed server, detection time, and operation ID.
 A recovered server clears a waiting repair; a repair cannot start before the
 configured grace period, with fewer than two healthy members, without an
 active replacement node, or while another movement is in progress.
+
+Replacement selection applies the same per-database size and disk-reserve
+admission gate as initial placement and rebalancing. A reachable active node
+that lacks the configured reserve is not a repair target.
 
 Repair is a catalog-fenced specialization of durable movement. Snapshot and
 bootstrap use a surviving SQLite replica. The replacement is added, caught up
@@ -206,6 +225,11 @@ resume.
 
 ## Fleet migrations
 
+A migration write is acknowledged only when the leader's durable migration
+history contains that exact migration set, ID, and command hash. Reaching the
+requested schema version through another command cannot turn a rejected or
+conflicting migration into a successful reply.
+
 A migration Raft command binds its set, immutable ID, content hash,
 consecutive source and target schema versions, and ordered DDL. The SQLite
 applier executes the DDL, inserts its history row, advances `schema_version`,
@@ -217,6 +241,9 @@ versions, and hash match. Fleet campaigns are catalog-replicated. Selection is
 deterministic, canaries precede bounded batches, canary failure durably pauses,
 and attempt counts and results come from consistent catalog reads. Process loss
 may cause a retry but cannot skip a version or report unverified work complete.
+Each recorded result carries its monotonically increasing attempt number;
+replaying the same attempt and result is a no-op, while conflicting or skipped
+attempt numbers fail closed.
 Campaign creation requires a caller-supplied idempotency key and deterministically
 derives the catalog ID from that key and migration-set name. A durable pause is
 sticky across results already in flight. Migration admission and catalog schema
@@ -267,4 +294,4 @@ operational hints and do not participate in replication decisions.
 
 Phase 6 never exposes a plaintext listener. Enabling the HTTP service requires TLS certificate material and at least one configured bearer credential. Tokens are compared in constant time and removed from the authenticated identity before dispatch. Admin authorization is required for create, delete, and fleet listing; service identities can access only their explicit database allow-list.
 
-Every data request performs a consistent ready-state catalog lookup before attaching to the recorded Ra group. Reads still use the quorum barrier and SQLite catch-up path. The external query policy accepts one `SELECT` statement, rejects comments, multiple statements, mutation and administrative keywords, and Erlite internal table names. After catch-up, the serialized SQLite owner enables `PRAGMA query_only` for the query and restores it before servicing another operation, making SQLite itself reject mutation attempts. If restoring writable mode fails, the owner terminates instead of remaining available in a state that cannot apply committed entries; the failure propagates through the temporary database controller so a later route reattaches fresh processes and connections. Writes are typed transactions submitted through the deterministic Ra command policy. A transaction timeout remains an ambiguous outcome and clients must retry identical content with the same transaction ID.
+Every data request performs a consistent ready-state catalog lookup before attaching to the recorded Ra group. Reads still use the quorum barrier and SQLite catch-up path. The external query policy accepts one `SELECT` statement, rejects comments, multiple statements, mutation and administrative keywords, extension loading, SQLite schema tables, and Erlite internal table names. Keywords are inspected at token boundaries outside string literals, avoiding both substring false positives and literal-value bypasses. After catch-up, the serialized SQLite owner enables `PRAGMA query_only` for the query and restores it before servicing another operation, making SQLite itself reject mutation attempts. If restoring writable mode fails, the owner terminates instead of remaining available in a state that cannot apply committed entries; the failure propagates through the temporary database controller so a later route reattaches fresh processes and connections. Writes are typed transactions submitted through the deterministic Ra command policy. A transaction timeout remains an ambiguous outcome and clients must retry identical content with the same transaction ID.

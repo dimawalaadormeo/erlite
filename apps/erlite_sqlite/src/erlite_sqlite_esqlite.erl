@@ -6,17 +6,20 @@
 -spec open(file:filename_all(), erlite_sqlite_adapter:open_options()) ->
     {ok, esqlite3:esqlite3()} | {error, term()}.
 open(Path, Options) when map_size(Options) =:= 0 ->
-    esqlite3:open(filename_string(Path));
+    normalize_exception(fun() -> esqlite3:open(filename_string(Path)) end);
 open(_Path, Options) ->
     {error, {unsupported_open_options, Options}}.
 
 -spec close(esqlite3:esqlite3()) -> ok | {error, term()}.
 close(Connection) ->
-    esqlite3:close(Connection).
+    normalize_exception(fun() -> esqlite3:close(Connection) end).
 
 -spec execute(esqlite3:esqlite3(), binary(), erlite_sqlite_adapter:params()) ->
     {ok, erlite_sqlite_adapter:execute_result()} | {error, term()}.
 execute(Connection, Sql, Params) ->
+    normalize_exception(fun() -> execute_unsafe(Connection, Sql, Params) end).
+
+execute_unsafe(Connection, Sql, Params) ->
     case esqlite3:q(Connection, Sql, to_esqlite_params(Params)) of
         Rows when is_list(Rows) ->
             {ok, #{changes => esqlite3:changes(Connection),
@@ -28,6 +31,9 @@ execute(Connection, Sql, Params) ->
 -spec query(esqlite3:esqlite3(), binary(), erlite_sqlite_adapter:params()) ->
     {ok, erlite_sqlite_adapter:query_result()} | {error, term()}.
 query(Connection, Sql, Params) ->
+    normalize_exception(fun() -> query_unsafe(Connection, Sql, Params) end).
+
+query_unsafe(Connection, Sql, Params) ->
     case prepare_and_bind(Connection, Sql, Params) of
         {ok, Statement} ->
             Columns = esqlite3:column_names(Statement),
@@ -44,11 +50,20 @@ query(Connection, Sql, Params) ->
 -spec transaction(esqlite3:esqlite3(), [erlite_sqlite_adapter:statement()]) ->
     {ok, [erlite_sqlite_adapter:statement_result()]} | {error, term()}.
 transaction(Connection, Statements) ->
+    normalize_exception(fun() -> transaction_unsafe(Connection, Statements) end).
+
+transaction_unsafe(Connection, Statements) ->
     case esqlite3:exec(Connection, <<"BEGIN IMMEDIATE">>) of
         ok ->
-            finish_transaction(Connection, run_statements(Connection, Statements, []));
-        {error, _Code} = Error ->
-            Error
+            try finish_transaction(Connection,
+                                   run_statements(Connection, Statements, []))
+            catch
+                Class:Reason ->
+                    _ = normalize_exception(
+                          fun() -> esqlite3:exec(Connection, <<"ROLLBACK">>) end),
+                    {error, {sqlite_exception, Class, Reason}}
+            end;
+        {error, _Code} = Error -> Error
     end.
 
 finish_transaction(Connection, {ok, Results}) ->
@@ -98,3 +113,8 @@ filename_string(Path) when is_binary(Path) ->
 filename_string(Path) ->
     filename:flatten(Path).
 
+normalize_exception(Fun) ->
+    try Fun()
+    catch
+        Class:Reason -> {error, {sqlite_exception, Class, Reason}}
+    end.

@@ -131,33 +131,35 @@ maybe_start_repair(Database, Repair, Nodes, Catalog) ->
             end
     end.
 
-choose_replacement(#{replicas := Replicas}, Nodes) ->
+choose_replacement(#{database_id := DatabaseId, replicas := Replicas}, Nodes) ->
+    choose_replacement(DatabaseId, Replicas, Nodes).
+
+choose_replacement(DatabaseId, Replicas, Nodes) ->
     ReplicaNodes = [Node || {_, Node} <- Replicas],
+    Options = application:get_env(erlite_core, placement_options, #{}),
     Candidates = lists:sort(
                    [Node || #{state := active, server_id := {_, Node}} <- Nodes,
                             not lists:member(Node, ReplicaNodes),
-                            node_healthy(Node)]),
+                            erlite_node_health:healthy(Node),
+                            erlite_placement:can_place(DatabaseId, Node,
+                                                       Options)]),
     case Candidates of
         [Node | _] -> {ok, Node};
         [] -> {error, no_repair_target}
     end.
 
 repair_server_id(DatabaseId, Generation, TargetNode) ->
-    Digest = binary_to_list(binary:encode_hex(
-                              crypto:hash(sha256, DatabaseId), lowercase)),
+    Digest = binary_to_list(erlite_sqlite_database:digest(DatabaseId)),
     {list_to_atom("erlite_db_" ++ Digest ++ "_g" ++
                   integer_to_list(Generation) ++ "_repair_replacement"),
      TargetNode}.
 
 replica_healthy({Name, Node}) ->
-    node_healthy(Node) andalso
+    erlite_node_health:healthy(Node) andalso
         case rpc:call(Node, ra_directory, where_is, [default, Name], 2000) of
             Pid when is_pid(Pid) -> true;
             _ -> false
         end.
-
-node_healthy(Node) when Node =:= node() -> true;
-node_healthy(Node) -> net_adm:ping(Node) =:= pong.
 
 reconcile_movement() ->
     case erlite_database_lifecycle:reconcile() of
@@ -171,16 +173,18 @@ cleanup_stale(#{stale_replicas := Stale, database_id := DatabaseId,
 cleanup_stale(_Database, _Catalog, _Root) -> ok.
 
 cleanup_stale_list([], _DatabaseId, _Generation, _Catalog, _Root) -> ok;
-cleanup_stale_list([#{server_id := ServerId} | Rest], DatabaseId, Generation,
+cleanup_stale_list([#{server_id := ServerId, generation := StaleGeneration}
+                    | Rest], DatabaseId, Generation,
                    Catalog, Root) ->
-    case node_healthy(element(2, ServerId)) of
+    case erlite_node_health:healthy(element(2, ServerId)) of
         false -> ok;
         true ->
             case erlite_database:cleanup_stale_replica(
                    DatabaseId, Root, ServerId) of
                 ok ->
                     case erlite_catalog:clear_stale_replica(
-                           Catalog, DatabaseId, ServerId, Generation,
+                           Catalog, DatabaseId, ServerId, StaleGeneration,
+                           Generation,
                            ?TIMEOUT) of
                         ok -> cleanup_stale_list(Rest, DatabaseId, Generation,
                                                  Catalog, Root);

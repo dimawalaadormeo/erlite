@@ -2,7 +2,7 @@
 
 -include_lib("kernel/include/file.hrl").
 
--export([path/2, create/2, open/2, delete/2]).
+-export([path/2, digest/1, create/2, open/2, delete/2]).
 
 -define(MAX_DATABASE_ID_BYTES, 1024).
 
@@ -14,12 +14,17 @@
 path(StorageRoot, DatabaseId) ->
     case validate(StorageRoot, DatabaseId) of
         {ok, Root} ->
-            Digest = binary:encode_hex(crypto:hash(sha256, DatabaseId), lowercase),
+            Digest = digest(DatabaseId),
             Filename = "db-" ++ binary_to_list(Digest) ++ ".sqlite",
             {ok, filename:join(Root, Filename)};
         {error, _Reason} = Error ->
             Error
     end.
+
+-spec digest(database_id()) -> binary().
+digest(DatabaseId) when is_binary(DatabaseId), byte_size(DatabaseId) > 0,
+                        byte_size(DatabaseId) =< ?MAX_DATABASE_ID_BYTES ->
+    binary:encode_hex(crypto:hash(sha256, DatabaseId), lowercase).
 
 -spec create(storage_root(), database_id()) -> ok | {error, term()}.
 create(StorageRoot, DatabaseId) ->

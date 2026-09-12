@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"regexp"
 )
 
 // Target identifies which deployment target a config is for. Kubernetes and
@@ -90,6 +92,7 @@ type Config struct {
 	TLSCertPath          string  `json:"tlsCertPath,omitempty"`
 	TLSKeyPath           string  `json:"tlsKeyPath,omitempty"`
 	Firewall             bool    `json:"firewall,omitempty"`
+	firewallConfigured   bool
 
 	// Security
 	AdminCredentialSource string `json:"adminCredentialSource,omitempty"`
@@ -159,6 +162,9 @@ func (c *Config) ApplyDefaults() {
 	if c.APIPort == 0 {
 		c.APIPort = 4433
 	}
+	if !c.firewallConfigured {
+		c.Firewall = true
+	}
 	if c.TLSMode == "" {
 		c.TLSMode = TLSGenerateSelfSigned
 	}
@@ -207,6 +213,8 @@ func (c *Config) Validate() []string {
 
 	if c.ClusterName == "" {
 		errs = append(errs, "clusterName is required")
+	} else if !regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`).MatchString(c.ClusterName) {
+		errs = append(errs, "clusterName contains unsafe characters")
 	}
 
 	if len(c.Nodes) < 3 {
@@ -215,6 +223,9 @@ func (c *Config) Validate() []string {
 
 	seeds := 0
 	names := map[string]bool{}
+	hosts := map[string]bool{}
+	safeName := regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
+	safeHost := regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.-]*$`)
 	for i, n := range c.Nodes {
 		if n.Name == "" {
 			errs = append(errs, fmt.Sprintf("nodes[%d].name is required", i))
@@ -223,8 +234,17 @@ func (c *Config) Validate() []string {
 		} else {
 			names[n.Name] = true
 		}
+		if n.Name != "" && !safeName.MatchString(n.Name) {
+			errs = append(errs, fmt.Sprintf("nodes[%d].name contains unsafe characters", i))
+		}
 		if n.Host == "" {
 			errs = append(errs, fmt.Sprintf("nodes[%d].host is required", i))
+		} else if !safeHost.MatchString(n.Host) {
+			errs = append(errs, fmt.Sprintf("nodes[%d].host contains unsafe characters", i))
+		} else if c.Target == TargetServer && hosts[n.Host] {
+			errs = append(errs, fmt.Sprintf("duplicate server host %q", n.Host))
+		} else if c.Target == TargetServer {
+			hosts[n.Host] = true
 		}
 		if n.Seed {
 			seeds++
@@ -242,6 +262,9 @@ func (c *Config) Validate() []string {
 
 	if c.StoragePath == "" {
 		errs = append(errs, "storagePath is required")
+	} else if !filepath.IsAbs(c.StoragePath) || filepath.Clean(c.StoragePath) != c.StoragePath ||
+		!regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`).MatchString(c.StoragePath) {
+		errs = append(errs, "storagePath must be an absolute shell-safe path")
 	}
 	if c.APIPort <= 0 || c.APIPort > 65535 {
 		errs = append(errs, "apiPort must be between 1 and 65535")
@@ -272,6 +295,8 @@ func (c *Config) Validate() []string {
 		}
 		if c.SSHUser == "" {
 			errs = append(errs, "sshUser is required for the server target")
+		} else if !regexp.MustCompile(`^[a-z_][a-z0-9_-]*\$?$`).MatchString(c.SSHUser) {
+			errs = append(errs, "sshUser contains unsafe characters")
 		}
 	case TargetKubernetes:
 		if c.K8sNamespace == "" {
@@ -300,6 +325,10 @@ func Load(path string) (*Config, error) {
 	var c Config
 	if err := json.Unmarshal(data, &c); err != nil {
 		return nil, fmt.Errorf("parsing config file as JSON: %w", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err == nil {
+		_, c.firewallConfigured = fields["firewall"]
 	}
 	c.ApplyDefaults()
 	return &c, nil
@@ -339,7 +368,11 @@ func (c *Config) OtherNodes() []Node {
 func (c *Config) SeedNodesList() []string {
 	out := make([]string, 0, len(c.Nodes))
 	for _, n := range c.Nodes {
-		out = append(out, n.Name+"@"+n.Host)
+		host := n.Host
+		if c.Target == TargetDocker || c.Target == TargetPodman {
+			host = n.Name
+		}
+		out = append(out, n.Name+"@"+host)
 	}
 	return out
 }

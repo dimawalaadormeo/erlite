@@ -3,6 +3,7 @@
 
 -export([start_link/2, close/1, execute/3, query/3, readonly_query/3, transaction/2,
          last_applied_index/1, schema_version/1, migration_history/1,
+         migration_status/4,
          transaction_status/3, apply_committed/6, apply_committed/7,
          apply_migration/9,
          runtime_identity/1, verify_runtime/2, validate_schema/1,
@@ -49,6 +50,9 @@ last_applied_index(Pid) ->
 
 schema_version(Pid) -> gen_server:call(Pid, schema_version, infinity).
 migration_history(Pid) -> gen_server:call(Pid, migration_history, infinity).
+migration_status(Pid, Set, MigrationId, CommandHash) ->
+    gen_server:call(Pid, {migration_status, Set, MigrationId, CommandHash},
+                    infinity).
 
 -spec transaction_status(pid(), binary(), binary()) ->
     new | duplicate | rejected | conflict | {error, term()}.
@@ -120,6 +124,10 @@ handle_call(schema_version, _From, State = #state{connection = Connection}) ->
     {reply, erlite_sqlite_schema:schema_version(Connection), State};
 handle_call(migration_history, _From, State = #state{connection = Connection}) ->
     {reply, erlite_sqlite_schema:migration_history(Connection), State};
+handle_call({migration_status, Set, MigrationId, CommandHash}, _From,
+            State = #state{connection = Connection}) ->
+    {reply, erlite_sqlite_schema:migration_status(
+              Connection, Set, MigrationId, CommandHash), State};
 handle_call({transaction_status, TransactionId, CommandHash}, _From,
             State = #state{connection = Connection}) ->
     {reply, erlite_sqlite_schema:transaction_status(

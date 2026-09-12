@@ -105,14 +105,17 @@ apply(_Meta, {prepare_database_repair, DatabaseId, OperationId, Generation,
               Failed, Replacement}, State) ->
     prepare_database_repair(DatabaseId, OperationId, Generation, Failed,
                             Replacement, State);
-apply(_Meta, {clear_stale_replica, DatabaseId, ServerId, Generation}, State) ->
-    clear_stale_replica(DatabaseId, ServerId, Generation, State);
+apply(_Meta, {clear_stale_replica, DatabaseId, ServerId, StaleGeneration,
+              Generation}, State) ->
+    clear_stale_replica(DatabaseId, ServerId, StaleGeneration, Generation,
+                        State);
 apply(_Meta, {create_migration_campaign, Campaign}, State) ->
     create_migration_campaign(Campaign, State);
 apply(_Meta, {set_migration_campaign_state, CampaignId, Status}, State) ->
     set_migration_campaign_state(CampaignId, Status, State);
-apply(_Meta, {record_migration_result, CampaignId, DatabaseId, Result}, State) ->
-    record_migration_result(CampaignId, DatabaseId, Result, State);
+apply(_Meta, {record_migration_result, CampaignId, DatabaseId, Attempt, Result},
+      State) ->
+    record_migration_result(CampaignId, DatabaseId, Attempt, Result, State);
 apply(_Meta, {advance_database_schema, DatabaseId, Generation, From, To}, State) ->
     advance_database_schema(DatabaseId, Generation, From, To, State);
 apply(_Meta, {prepare_database_migration, DatabaseId, CampaignId, MigrationId,
@@ -178,28 +181,57 @@ set_migration_campaign_state(Id, Status, State)
 set_migration_campaign_state(_, _, State) ->
     {State, {error, invalid_campaign_state}}.
 
-record_migration_result(Id, DatabaseId, Result, State) ->
+record_migration_result(Id, DatabaseId, Attempt, Result, State)
+  when is_integer(Attempt), Attempt > 0 ->
+    case Result of
+        ok -> record_valid_migration_result(Id, DatabaseId, Attempt, Result,
+                                            State);
+        {error, _} -> record_valid_migration_result(
+                        Id, DatabaseId, Attempt, Result, State);
+        _ -> {State, {error, invalid_migration_result}}
+    end;
+record_migration_result(_Id, _DatabaseId, _Attempt, _Result, State) ->
+    {State, {error, invalid_migration_attempt}}.
+
+record_valid_migration_result(Id, DatabaseId, Attempt, Result, State) ->
     update_campaign(Id,
       fun(Campaign = #{entries := Entries}) ->
           case maps:find(DatabaseId, Entries) of
               error -> {error, database_not_in_campaign};
               {ok, Entry} ->
-                  Attempts = maps:get(attempts, Entry) + 1,
-                  NewEntry = case Result of
-                      ok -> Entry#{status => complete, attempts => Attempts};
-                      {error, Reason} -> Entry#{status => failed,
-                                               attempts => Attempts,
-                                               error => Reason}
-                  end,
-                  NewEntries = Entries#{DatabaseId => NewEntry},
-                  Status = case maps:get(status, Campaign) of
-                      paused -> paused;
-                      _ -> campaign_completion(NewEntries,
-                             maps:get(max_retries, Campaign))
-                  end,
-                  {ok, Campaign#{entries => NewEntries, status => Status}}
+                  record_attempt(Campaign, Entries, DatabaseId, Entry,
+                                 Attempt, Result)
           end
       end, State).
+
+record_attempt(Campaign, _Entries, _DatabaseId,
+               #{attempts := Attempt, last_result := Result}, Attempt, Result) ->
+    {ok, Campaign};
+record_attempt(_Campaign, _Entries, _DatabaseId,
+               #{attempts := Attempt, last_result := Previous}, Attempt, Result) ->
+    {error, {migration_attempt_conflict, Attempt, Previous, Result}};
+record_attempt(Campaign, Entries, DatabaseId, Entry, Attempt, Result) ->
+    Expected = maps:get(attempts, Entry) + 1,
+    case Attempt =:= Expected of
+        false -> {error, {unexpected_migration_attempt, Expected, Attempt}};
+        true ->
+            NewEntry = case Result of
+                ok -> maps:remove(error, Entry#{status => complete,
+                                                attempts => Attempt,
+                                                last_result => ok});
+                {error, Reason} -> Entry#{status => failed,
+                                         attempts => Attempt,
+                                         last_result => Result,
+                                         error => Reason}
+            end,
+            NewEntries = Entries#{DatabaseId => NewEntry},
+            Status = case maps:get(status, Campaign) of
+                paused -> paused;
+                _ -> campaign_completion(NewEntries,
+                                         maps:get(max_retries, Campaign))
+            end,
+            {ok, Campaign#{entries => NewEntries, status => Status}}
+    end.
 
 campaign_completion(Entries, MaxRetries) ->
     Values = maps:values(Entries),
@@ -330,6 +362,9 @@ advance_ready_database_schema(#{movement := #{operation_id := OperationId}},
 advance_ready_database_schema(#{repair := #{operation_id := OperationId}},
                               _From, _To, State) ->
     {State, {error, {repair_in_progress, OperationId}}};
+advance_ready_database_schema(#{migration := #{campaign_id := CampaignId}},
+                              _From, _To, State) ->
+    {State, {error, {migration_in_progress, CampaignId}}};
 advance_ready_database_schema(Existing = #{schema_version := From}, From, To,
                               State) ->
     put_database(Existing#{schema_version => To}, State);
@@ -351,12 +386,7 @@ prepare_unique_join(Node, State = #{nodes := Nodes}) ->
             {State#{nodes => Nodes#{NodeId => Node}}, ok}
     end.
 
-valid_join_node(#{node_id := NodeId, node_name := NodeName,
-                  server_id := {ServerName, ErlangNode}})
-  when is_binary(NodeId), byte_size(NodeId) =:= 16,
-       is_binary(NodeName), byte_size(NodeName) > 0,
-       is_atom(ServerName), is_atom(ErlangNode) -> true;
-valid_join_node(_) -> false.
+valid_join_node(Node) -> erlite_catalog_validation:valid_node(Node).
 
 same_identity(Left, Right) ->
     lists:all(fun(Key) -> maps:get(Key, Left) =:= maps:get(Key, Right) end,
@@ -414,6 +444,9 @@ prepare_database_delete(DatabaseId, OperationId, Generation,
                 #{generation := Generation, state := ready,
                   movement := #{operation_id := MoveOperation}} ->
                     {State, {error, {movement_in_progress, MoveOperation}}};
+                #{generation := Generation, state := ready,
+                  repair := #{operation_id := RepairOperation}} ->
+                    {State, {error, {repair_in_progress, RepairOperation}}};
                 #{generation := Generation, state := ready,
                   migration := #{campaign_id := CampaignId}} ->
                     {State, {error, {migration_in_progress, CampaignId}}};
@@ -744,13 +777,14 @@ prepare_database_repair(DatabaseId, OperationId, Generation, Failed,
         Existing -> {State, move_fence_error(Existing, OperationId, Generation)}
     end.
 
-clear_stale_replica(DatabaseId, ServerId, Generation, State) ->
+clear_stale_replica(DatabaseId, ServerId, StaleGeneration, Generation, State) ->
     Databases = maps:get(databases, State, #{}),
     case maps:get(DatabaseId, Databases, undefined) of
         Existing = #{generation := Generation} ->
             Stale = maps:get(stale_replicas, Existing, []),
             Remaining = [Entry || Entry <- Stale,
-                                  maps:get(server_id, Entry) =/= ServerId],
+                                  maps:get(server_id, Entry) =/= ServerId orelse
+                                  maps:get(generation, Entry) =/= StaleGeneration],
             Updated = case Remaining of
                           [] -> maps:remove(stale_replicas, Existing);
                           _ -> Existing#{stale_replicas => Remaining}
@@ -792,7 +826,7 @@ valid_database_operation(DatabaseId, OperationId, Generation, Replicas) ->
         lists:all(fun valid_server_id/1, Replicas).
 
 valid_identity(DatabaseId, OperationId, Generation) ->
-    is_binary(DatabaseId) andalso byte_size(DatabaseId) > 0 andalso
+    erlite_catalog_validation:valid_database_id(DatabaseId) andalso
         is_binary(OperationId) andalso byte_size(OperationId) =:= 16 andalso
         is_integer(Generation) andalso Generation > 0.
 

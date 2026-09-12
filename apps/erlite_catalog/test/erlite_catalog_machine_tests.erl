@@ -197,6 +197,10 @@ database_repair_is_durable_serialized_and_tracks_stale_replica_test() ->
           #{index => 5},
           {prepare_database_move, DatabaseId, <<16:128>>, 1, Failed,
            Replacement}, State1),
+    {State1, {error, {repair_in_progress, OperationId}}} =
+        erlite_catalog_machine:apply(
+          #{index => 5},
+          {prepare_database_delete, DatabaseId, <<19:128>>, 1}, State1),
     Prepare = {prepare_database_repair, DatabaseId, OperationId, 1, Failed,
                Replacement},
     {State2, ok} = erlite_catalog_machine:apply(#{index => 6}, Prepare, State1),
@@ -219,7 +223,7 @@ database_repair_is_durable_serialized_and_tracks_stale_replica_test() ->
     Failed = maps:get(server_id, Stale),
     {State5, ok} = erlite_catalog_machine:apply(
                      #{index => 10},
-                     {clear_stale_replica, DatabaseId, Failed, 2}, State4),
+                     {clear_stale_replica, DatabaseId, Failed, 1, 2}, State4),
     {ok, Clean} = erlite_catalog_machine:database(DatabaseId, State5),
     false = maps:is_key(stale_replicas, Clean).
 
@@ -308,10 +312,13 @@ migration_campaign_is_durable_pauseable_and_reported_test() ->
                                      CampaignId, running}, State2),
     {State4, ok} = erlite_catalog_machine:apply(
                      #{index => 4}, {record_migration_result,
-                                     CampaignId, <<"a">>, ok}, State3),
-    {State5, ok} = erlite_catalog_machine:apply(
+                     CampaignId, <<"a">>, 1, ok}, State3),
+    {State4, ok} = erlite_catalog_machine:apply(
                      #{index => 5}, {record_migration_result,
-                                     CampaignId, <<"b">>, ok}, State4),
+                     CampaignId, <<"a">>, 1, ok}, State4),
+    {State5, ok} = erlite_catalog_machine:apply(
+                     #{index => 6}, {record_migration_result,
+                     CampaignId, <<"b">>, 1, ok}, State4),
     {ok, #{status := complete, entries := Entries}} =
         erlite_catalog_machine:campaign(CampaignId, State5),
     complete = maps:get(status, maps:get(<<"a">>, Entries)).
@@ -330,7 +337,7 @@ paused_campaign_is_not_resumed_by_inflight_result_test() ->
                      #{index => 2}, {set_migration_campaign_state, Id, paused},
                      State1),
     {State3, ok} = erlite_catalog_machine:apply(
-                     #{index => 3}, {record_migration_result, Id, <<"a">>, ok},
+                     #{index => 3}, {record_migration_result, Id, <<"a">>, 1, ok},
                      State2),
     {ok, #{status := paused}} = erlite_catalog_machine:campaign(Id, State3),
     {State4, ok} = erlite_catalog_machine:apply(

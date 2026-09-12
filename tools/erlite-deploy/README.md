@@ -3,6 +3,7 @@
 Generates Erlite cluster deployment scripts, manifests, and a tailored
 install guide from one config file. Single static Go binary, no runtime
 dependencies. See `../../docs/deployment-system-plan.md` for the full design.
+For a start-to-finish operator walkthrough, see `../../docs/deployment.md`.
 
 ## Build
 
@@ -43,6 +44,10 @@ produces `install-<node>.sh` per node, `erlite.service`,
 `bootstrap-cluster.sh`, `provision-all.sh`, `tls-gen.sh` (if
 `tlsMode` is `generate-self-signed`), `admin-credentials.txt` (if
 `adminCredentialSource` is `generate`), and `DEPLOY_GUIDE.md`.
+
+Validation rejects shell-unsafe cluster names, SSH users, storage paths, node
+names, and hosts. Server deployments also require a distinct host for every
+node so generated installs cannot overwrite one another.
 
 For the `docker` / `podman` target, the required fields are `target`,
 `clusterName`, `nodes`, and `erliteReleaseRef`; output is

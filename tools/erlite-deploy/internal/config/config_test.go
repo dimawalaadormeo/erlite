@@ -1,9 +1,71 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestLoadDefaultsFirewallButPreservesExplicitFalse(t *testing.T) {
+	dir := t.TempDir()
+	base := `{"target":"server","clusterName":"test","nodes":[]}`
+	omitted := filepath.Join(dir, "omitted.json")
+	if err := os.WriteFile(omitted, []byte(base), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(omitted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Firewall {
+		t.Fatal("omitted firewall should default to true")
+	}
+	explicit := filepath.Join(dir, "explicit.json")
+	if err := os.WriteFile(explicit, []byte(`{"firewall":false,"nodes":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err = Load(explicit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Firewall {
+		t.Fatal("explicit firewall=false must be preserved")
+	}
+}
+
+func TestValidateRejectsUnsafeNodeIdentityCharacters(t *testing.T) {
+	c := validServerConfig()
+	c.Nodes[0].Name = "../../escape"
+	c.Nodes[1].Host = "host;touch-pwned"
+	errs := c.Validate()
+	if !containsSubstring(errs, "name contains unsafe characters") ||
+		!containsSubstring(errs, "host contains unsafe characters") {
+		t.Fatalf("expected unsafe identity errors, got %v", errs)
+	}
+}
+
+func TestValidateRejectsUnsafeShellFieldsAndDuplicateServerHosts(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Config)
+		want   string
+	}{
+		{"cluster name", func(c *Config) { c.ClusterName = `prod$(touch pwned)` }, "clusterName contains unsafe characters"},
+		{"ssh user", func(c *Config) { c.SSHUser = `ops$(touch pwned)` }, "sshUser contains unsafe characters"},
+		{"storage path", func(c *Config) { c.StoragePath = `/srv/$(touch-pwned)` }, "storagePath must be an absolute shell-safe path"},
+		{"duplicate host", func(c *Config) { c.Nodes[1].Host = c.Nodes[0].Host }, "duplicate server host"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			c := validServerConfig()
+			test.mutate(c)
+			if errs := c.Validate(); !containsSubstring(errs, test.want) {
+				t.Fatalf("expected %q, got %v", test.want, errs)
+			}
+		})
+	}
+}
 
 func validServerConfig() *Config {
 	c := &Config{

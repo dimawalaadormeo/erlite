@@ -73,6 +73,21 @@ See [`docs/correctness.md`](docs/correctness.md) and
 [`docs/architecture.md`](docs/architecture.md) for the detailed invariants.
 The Phase 13 failure matrix is in [`docs/hardening.md`](docs/hardening.md).
 
+## Documentation
+
+- **Deployment:** [`docs/deployment.md`](docs/deployment.md), the practical
+  manual and generated-artifact tutorial;
+  [`tools/erlite-deploy/README.md`](tools/erlite-deploy/README.md), the tool
+  reference; and [`docs/deployment-system-plan.md`](docs/deployment-system-plan.md),
+  the deployment architecture and roadmap
+- **Testing:** [`docs/hardening.md`](docs/hardening.md) and
+  [`docs/scale-validation.md`](docs/scale-validation.md)
+- **Development:** [`ERLITE_PROJECT.md`](ERLITE_PROJECT.md),
+  [`docs/architecture.md`](docs/architecture.md), and
+  [`docs/correctness.md`](docs/correctness.md)
+- **Operations and API:** [`docs/user-guide.md`](docs/user-guide.md) and
+  [`docs/http-api.md`](docs/http-api.md)
+
 ## Getting started
 
 Build the release command:

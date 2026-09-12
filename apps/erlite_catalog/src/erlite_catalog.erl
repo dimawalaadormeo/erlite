@@ -8,9 +8,9 @@
          prepare_database_restore/9, finish_database_restore/5,
          mark_database_under_replicated/7,
          clear_database_under_replicated/5, prepare_database_repair/7,
-         clear_stale_replica/5,
+         clear_stale_replica/6,
          create_migration_campaign/3, set_migration_campaign_state/4,
-         record_migration_result/5, migration_campaign/4,
+         record_migration_result/6, migration_campaign/4,
          advance_database_schema/6,
          prepare_database_migration/8, finish_database_migration/8,
          abort_database_migration/6,
@@ -135,11 +135,14 @@ prepare_database_repair(ServerRef, DatabaseId, OperationId, Generation, Failed,
             {prepare_database_repair, DatabaseId, OperationId, Generation,
              Failed, Replacement}, Timeout).
 
--spec clear_stale_replica(term(), binary(), term(), pos_integer(), timeout()) ->
+-spec clear_stale_replica(term(), binary(), term(), pos_integer(),
+                          pos_integer(), timeout()) ->
     ok | {error, term()} | {timeout, term()}.
-clear_stale_replica(ServerRef, DatabaseId, ServerId, Generation, Timeout) ->
+clear_stale_replica(ServerRef, DatabaseId, ServerId, StaleGeneration,
+                    Generation, Timeout) ->
     command(ServerRef,
-            {clear_stale_replica, DatabaseId, ServerId, Generation}, Timeout).
+            {clear_stale_replica, DatabaseId, ServerId, StaleGeneration,
+             Generation}, Timeout).
 
 create_migration_campaign(ServerRef, Campaign, Timeout) ->
     command(ServerRef, {create_migration_campaign, Campaign}, Timeout).
@@ -148,9 +151,11 @@ set_migration_campaign_state(ServerRef, CampaignId, Status, Timeout) ->
     command(ServerRef, {set_migration_campaign_state, CampaignId, Status},
             Timeout).
 
-record_migration_result(ServerRef, CampaignId, DatabaseId, Result, Timeout) ->
+record_migration_result(ServerRef, CampaignId, DatabaseId, Attempt, Result,
+                        Timeout) ->
     command(ServerRef,
-            {record_migration_result, CampaignId, DatabaseId, Result}, Timeout).
+            {record_migration_result, CampaignId, DatabaseId, Attempt, Result},
+            Timeout).
 
 advance_database_schema(ServerRef, DatabaseId, Generation, From, To, Timeout) ->
     command(ServerRef,
@@ -362,7 +367,7 @@ validate(ClusterId, ClusterName, Nodes)
   when is_binary(ClusterId), byte_size(ClusterId) =:= 16,
        is_binary(ClusterName), byte_size(ClusterName) > 0,
        length(Nodes) >= 1, length(Nodes) =< 3 ->
-    case lists:all(fun valid_node/1, Nodes) of
+    case lists:all(fun erlite_catalog_validation:valid_node/1, Nodes) of
         true -> validate_unique(Nodes);
         false -> {error, invalid_catalog_nodes}
     end;
@@ -374,13 +379,6 @@ validate(_ClusterId, ClusterName, _Nodes)
     {error, invalid_cluster_name};
 validate(_ClusterId, _ClusterName, _Nodes) ->
     {error, catalog_bootstrap_requires_one_to_three_nodes}.
-
-valid_node(#{node_id := NodeId, node_name := NodeName,
-             server_id := {ServerName, ErlangNode}})
-  when is_binary(NodeId), byte_size(NodeId) =:= 16,
-       is_binary(NodeName), byte_size(NodeName) > 0,
-       is_atom(ServerName), is_atom(ErlangNode) -> true;
-valid_node(_) -> false.
 
 validate_unique(Nodes) ->
     NodeIds = [maps:get(node_id, Node) || Node <- Nodes],

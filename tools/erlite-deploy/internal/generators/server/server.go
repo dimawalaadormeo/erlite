@@ -20,11 +20,12 @@ import (
 var templateFS embed.FS
 
 type nodeData struct {
-	Config           *config.Config
-	Node             config.Node
-	SeedNodesEnv     string
-	DistPortRangeUfw string
-	Firewall         bool
+	Config                 *config.Config
+	Node                   config.Node
+	SeedNodesEnv           string
+	DistPortRangeUfw       string
+	DistPortRangeFirewalld string
+	Firewall               bool
 }
 
 type clusterData struct {
@@ -65,11 +66,12 @@ func Generate(cfg *config.Config) ([]artifact.File, error) {
 
 	for _, n := range cfg.Nodes {
 		content, err := render("install.sh.tmpl", nodeData{
-			Config:           cfg,
-			Node:             n,
-			SeedNodesEnv:     seedNodesEnv,
-			DistPortRangeUfw: distUfw,
-			Firewall:         cfg.Firewall,
+			Config:                 cfg,
+			Node:                   n,
+			SeedNodesEnv:           seedNodesEnv,
+			DistPortRangeUfw:       distUfw,
+			DistPortRangeFirewalld: cfg.ClusterDistPortRange,
+			Firewall:               cfg.Firewall,
 		})
 		if err != nil {
 			return nil, err
@@ -129,7 +131,7 @@ func Generate(cfg *config.Config) ([]artifact.File, error) {
 		},
 		InstallSteps: []string{
 			"Copy this entire output directory to a machine with SSH access to every node.",
-			"Run `./provision-all.sh` to copy each node's install-<name>.sh to its host, run it there, and then bootstrap the cluster automatically. Or, to do it by hand: copy each install-<name>.sh to its matching node and run it there with sudo, then run `./bootstrap-cluster.sh` once every node has erlite.service running.",
+			"Run `./provision-all.sh` to copy each node's install-<name>.sh and erlite.service to its host, run it there, and then bootstrap the cluster automatically. Or, to do it by hand: copy both install-<name>.sh and erlite.service to the same directory on each matching node, run the install script there with sudo, then run `./bootstrap-cluster.sh` once every node has erlite.service running.",
 			"If tlsMode is generate-self-signed, run `./tls-gen.sh` once before provisioning and distribute its output to the matching nodes.",
 		},
 	})

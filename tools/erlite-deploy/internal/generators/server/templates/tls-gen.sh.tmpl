@@ -14,10 +14,11 @@ openssl req -x509 -newkey rsa:4096 -days 3650 -nodes \
 {{range .Nodes}}
 openssl req -newkey rsa:4096 -nodes \
   -keyout "$OUT_DIR/{{.Name}}.key" -out "$OUT_DIR/{{.Name}}.csr" \
-  -subj "/CN={{.Name}}"
+  -subj "/CN={{.Name}}" \
+  -addext "subjectAltName=DNS:{{.Name}},DNS:{{.Host}}"
 openssl x509 -req -in "$OUT_DIR/{{.Name}}.csr" \
   -CA "$OUT_DIR/ca.crt" -CAkey "$OUT_DIR/ca.key" -CAcreateserial \
-  -out "$OUT_DIR/{{.Name}}.crt" -days 825
+  -out "$OUT_DIR/{{.Name}}.crt" -days 825 -copy_extensions copy
 rm -f "$OUT_DIR/{{.Name}}.csr"
 {{- end}}
 
