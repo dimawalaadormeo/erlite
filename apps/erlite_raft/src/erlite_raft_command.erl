@@ -55,8 +55,9 @@ type({migration, _, _, _, _, _}) -> migration.
 -spec transaction_id(command()) -> binary().
 transaction_id({transaction, TransactionId, _SchemaVersion, _Mutations}) ->
     TransactionId;
-transaction_id({migration, Set, MigrationId, From, To, _}) ->
-    crypto:hash(sha256, term_to_binary({migration, Set, MigrationId, From, To},
+transaction_id({migration, Set, MigrationId, From, To, Statements}) ->
+    crypto:hash(sha256, term_to_binary({migration, Set, MigrationId, From, To,
+                                       Statements},
                                       [deterministic])).
 
 migration_id({migration, _Set, MigrationId, _, _, _}) -> MigrationId.

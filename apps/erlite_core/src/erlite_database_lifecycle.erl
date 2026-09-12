@@ -69,7 +69,8 @@ handle_info(reconcile, State) ->
 handle_info(_Info, State) -> {noreply, State}.
 
 create_database(DatabaseId, State = #{catalog_server := Catalog})
-  when is_binary(DatabaseId), byte_size(DatabaseId) > 0 ->
+  when is_binary(DatabaseId), byte_size(DatabaseId) > 0,
+       byte_size(DatabaseId) =< 1024 ->
     case erlite_catalog:database(Catalog, DatabaseId, ?TIMEOUT, consistent) of
         {error, database_not_found} -> begin_create(DatabaseId, State);
         {ok, Database = #{state := creating}} -> reconcile_one(Database, State);
@@ -444,9 +445,7 @@ valid_move_target(TargetNode, Replicas, Catalog) ->
     end.
 
 replacement_server_id(DatabaseId, Generation, TargetNode) ->
-    Digest = binary_to_list(
-               binary:encode_hex(
-                 crypto:hash(sha256, DatabaseId), lowercase)),
+    Digest = binary_to_list(erlite_sqlite_database:digest(DatabaseId)),
     {list_to_atom("erlite_db_" ++ Digest ++ "_g" ++
                   integer_to_list(Generation) ++ "_replacement"), TargetNode}.
 
@@ -471,8 +470,7 @@ choose_replicas(DatabaseId, Generation, Catalog) ->
     end.
 
 make_server_ids(DatabaseId, Generation, Nodes) ->
-    Digest = binary_to_list(binary:encode_hex(
-                              crypto:hash(sha256, DatabaseId), lowercase)),
+    Digest = binary_to_list(erlite_sqlite_database:digest(DatabaseId)),
     [{list_to_atom("erlite_db_" ++ Digest ++ "_g" ++
                    integer_to_list(Generation) ++ "_r" ++ integer_to_list(N)),
       ErlangNode}

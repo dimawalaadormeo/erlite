@@ -1,7 +1,7 @@
 -module(erlite_sqlite_schema).
 
 -export([initialize/1, last_applied_index/1, schema_version/1,
-         migration_history/1, transaction_status/3,
+         migration_history/1, migration_status/4, transaction_status/3,
          apply_committed/6, apply_committed/7, apply_migration/9,
          reset_raft_history/1]).
 
@@ -55,11 +55,23 @@ initialize(Connection) ->
     end.
 
 ensure_schema_version_column(Connection) ->
-    case erlite_sqlite:execute(Connection,
-           <<"ALTER TABLE __erlite_replica_metadata ADD COLUMN "
-             "schema_version INTEGER NOT NULL DEFAULT 0 CHECK (schema_version >= 0)">>, []) of
-        {ok, _} -> verify_format(Connection);
-        {error, _} -> verify_format(Connection)
+    case erlite_sqlite:query(Connection,
+                            <<"PRAGMA table_info(__erlite_replica_metadata)">>, []) of
+        {ok, #{rows := Rows}} ->
+            case lists:any(fun([_Cid, <<"schema_version">> | _]) -> true;
+                              (_) -> false
+                           end, Rows) of
+                true -> verify_format(Connection);
+                false ->
+                    case erlite_sqlite:execute(Connection,
+                           <<"ALTER TABLE __erlite_replica_metadata ADD COLUMN "
+                             "schema_version INTEGER NOT NULL DEFAULT 0 "
+                             "CHECK (schema_version >= 0)">>, []) of
+                        {ok, _} -> verify_format(Connection);
+                        {error, _} = Error -> Error
+                    end
+            end;
+        {error, _} = Error -> Error
     end.
 
 schema_version(Connection) ->
@@ -88,6 +100,28 @@ last_applied_index(Connection) ->
             {error, {invalid_replica_metadata, Rows}};
         {error, _Reason} = Error ->
             Error
+    end.
+
+migration_status(Connection, Set, MigrationId, CommandHash) ->
+    case migration_record(Connection, Set, MigrationId) of
+        {ok, CommandHash, _From, _To} -> duplicate;
+        {ok, _OtherHash, _From, _To} -> conflict;
+        not_found -> failed_migration_status(Connection, Set, MigrationId,
+                                             CommandHash);
+        {error, _Reason} = Error -> Error
+    end.
+
+failed_migration_status(Connection, Set, MigrationId, CommandHash) ->
+    case erlite_sqlite:query(
+           Connection,
+           <<"SELECT command_hash FROM __erlite_migration_failures "
+             "WHERE migration_set = ? AND migration_id = ?">>,
+           [Set, MigrationId]) of
+        {ok, #{rows := [[CommandHash]]}} -> rejected;
+        {ok, #{rows := [[_OtherHash]]}} -> conflict;
+        {ok, #{rows := []}} -> new;
+        {ok, #{rows := Rows}} -> {error, {invalid_migration_history, Rows}};
+        Error -> Error
     end.
 
 -spec transaction_status(erlite_sqlite:connection(), binary(), binary()) ->
@@ -356,6 +390,7 @@ reset_raft_history(Connection) ->
     Statements = [
         {execute, <<"DELETE FROM __erlite_transactions">>, []},
         {execute, <<"DELETE FROM __erlite_transaction_failures">>, []},
+        {execute, <<"DELETE FROM __erlite_migrations">>, []},
         {execute, <<"DELETE FROM __erlite_migration_failures">>, []},
         {execute,
          <<"UPDATE __erlite_replica_metadata "

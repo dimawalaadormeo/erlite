@@ -402,9 +402,19 @@ add_and_catch_up(ServerIds, Replacement, Owner, Timeout) ->
             case erlite_raft_database:readiness(
                    ServerIds, Replicas, Replacement, Timeout) of
                 {ok, ready, _Index} -> ok_result(Owner);
-                Other -> Other
+                Other -> rollback_unready_replacement(
+                           ServerIds, Replacement, Other, Timeout)
             end;
         Error -> Error
+    end.
+
+rollback_unready_replacement(ServerIds, Replacement, ReadinessError, Timeout) ->
+    case ra:remove_member(ServerIds, Replacement, Timeout) of
+        {ok, _Reply, _Leader} -> ReadinessError;
+        {error, not_member} -> ReadinessError;
+        RollbackError ->
+            {error, {replacement_readiness_failed_and_rollback_failed,
+                     ReadinessError, RollbackError}}
     end.
 
 ok_result(Owner) -> {ok, Owner}.
@@ -548,7 +558,7 @@ replacement_root(StorageRoot, Replacement) ->
                    binary_to_list(Digest)]).
 
 snapshot_manifest_name(DatabaseId, Generation, Index) ->
-    Digest = binary:encode_hex(crypto:hash(sha256, DatabaseId), lowercase),
+    Digest = erlite_sqlite_database:digest(DatabaseId),
     binary_to_list(Digest) ++ "-" ++ integer_to_list(Generation) ++ "-" ++
         integer_to_list(Index) ++ ".manifest".
 
@@ -769,5 +779,4 @@ member_call({_, Node}, Module, Function, Arguments) ->
     end.
 
 cluster_name(DatabaseId) ->
-    <<"erlite-db-", (binary:encode_hex(
-                       crypto:hash(sha256, DatabaseId), lowercase))/binary>>.
+    <<"erlite-db-", (erlite_sqlite_database:digest(DatabaseId))/binary>>.

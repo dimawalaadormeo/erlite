@@ -44,7 +44,16 @@ query_policy_is_read_only_and_hides_internal_tables_test() ->
                    <<"SELECT 1; DELETE FROM products">>)),
     ?assertEqual({error, unsafe_query},
                  erlite_api_query_policy:validate(
-                   <<"PRAGMA integrity_check">>)).
+                   <<"PRAGMA integrity_check">>)),
+    ?assertEqual({error, unsafe_query},
+                 erlite_api_query_policy:validate(
+                   <<"SELECT name FROM sqlite_master">>)),
+    ?assertEqual({error, unsafe_query},
+                 erlite_api_query_policy:validate(
+                   <<"SELECT load_extension(?)">>)),
+    ?assertEqual(ok, erlite_api_query_policy:validate(
+                       <<"SELECT created_at FROM audit_log "
+                         "WHERE note = 'delete from products'">>)).
 
 readiness_metrics_and_malformed_body_are_observed_test() ->
     {Pid, Owned} = ensure_observability(),

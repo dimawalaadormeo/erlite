@@ -61,6 +61,8 @@ handle_cast({cache, Epoch, DatabaseId, Database, Leader},
             State = #{epoch := Epoch}) ->
     Generation = maps:get(generation, Database),
     case ets:lookup(?CACHE, DatabaseId) of
+        [{DatabaseId, Generation, _OldDatabase, OldLeader}]
+          when Leader =:= undefined, OldLeader =/= undefined -> ok;
         [{DatabaseId, Current, _OldDatabase, _OldLeader}]
           when Current > Generation -> ok;
         _ -> true = ets:insert(

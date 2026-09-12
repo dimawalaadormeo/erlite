@@ -15,8 +15,8 @@ init(#{runtime_identity := RuntimeIdentity}) ->
 
 -spec apply(map(), term(), state()) ->
     {state(), term()} | {state(), term(), [ra_machine:effect()]}.
-apply(Meta, {checkpoint, ThroughIndex, Manifests}, State) ->
-    apply_checkpoint(Meta, ThroughIndex, Manifests, State);
+apply(Meta, {checkpoint, ThroughIndex, Manifests, Members}, State) ->
+    apply_checkpoint(Meta, ThroughIndex, Manifests, Members, State);
 apply(#{index := Index, term := Term}, Command,
       State = #{entries := Entries}) ->
     case erlite_raft_command:validate(Command) of
@@ -32,11 +32,22 @@ apply(#{index := Index, term := Term}, Command,
             {State, Error}
     end.
 
-apply_checkpoint(#{index := RaftIndex}, ThroughIndex, Manifests,
+apply_checkpoint(#{index := RaftIndex}, ThroughIndex, Manifests, Members,
                  State = #{entries := Entries, last_index := LastIndex,
                            checkpoint := Current})
   when is_integer(ThroughIndex), ThroughIndex >= 0,
-       ThroughIndex =< LastIndex, is_map(Manifests), map_size(Manifests) > 0 ->
+       ThroughIndex =< LastIndex, is_map(Manifests), map_size(Manifests) > 0,
+       is_list(Members) ->
+    case lists:sort(Members) =:= lists:sort(maps:keys(Manifests)) of
+        true -> apply_complete_checkpoint(RaftIndex, ThroughIndex, Manifests,
+                                          State, Entries, Current);
+        false -> {State, {error, incomplete_checkpoint_manifests}}
+    end;
+apply_checkpoint(_Meta, ThroughIndex, _Manifests, _Members, State) ->
+    {State, {error, {invalid_checkpoint, ThroughIndex}}}.
+
+apply_complete_checkpoint(RaftIndex, ThroughIndex, Manifests, State, Entries,
+                          Current) ->
     CurrentIndex = checkpoint_index(Current),
     case ThroughIndex >= CurrentIndex of
         true ->
@@ -50,9 +61,7 @@ apply_checkpoint(#{index := RaftIndex}, ThroughIndex, Manifests,
         false ->
             {State, {error, {checkpoint_regression,
                              CurrentIndex, ThroughIndex}}}
-    end;
-apply_checkpoint(_Meta, ThroughIndex, _Manifests, State) ->
-    {State, {error, {invalid_checkpoint, ThroughIndex}}}.
+    end.
 
 checkpoint_index(none) -> 0;
 checkpoint_index(#{through_index := Index}) -> Index.

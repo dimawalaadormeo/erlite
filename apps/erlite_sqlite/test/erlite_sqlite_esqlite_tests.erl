@@ -52,6 +52,11 @@ unsupported_open_options_test() ->
     ?assertEqual({error, {unsupported_open_options, #{mode => read_only}}},
                  erlite_sqlite_esqlite:open("unused.sqlite", #{mode => read_only})).
 
+nif_exceptions_are_normalized_test() ->
+    ?assertMatch({error, {sqlite_exception, _, _}},
+                 erlite_sqlite_esqlite:query(
+                   not_a_connection, <<"SELECT 1">>, [])).
+
 with_database(Test) ->
     Path = temporary_database_path(),
     {ok, Connection} = erlite_sqlite:open(Path),
@@ -80,4 +85,3 @@ delete_if_present(Path) ->
         ok -> ok;
         {error, enoent} -> ok
     end.
-

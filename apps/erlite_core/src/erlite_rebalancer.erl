@@ -65,7 +65,7 @@ scan_as_controller(Catalog) ->
             Nodes = lists:sort(
                       [Node || #{state := active,
                                  server_id := {_, Node}} <- NodeRecords,
-                               node_healthy(Node)]),
+                               erlite_node_health:healthy(Node)]),
             Limit = application:get_env(
                       erlite_core, rebalance_max_migrations_per_scan, 1),
             Options = application:get_env(erlite_core, placement_options, #{}),
@@ -75,9 +75,6 @@ scan_as_controller(Catalog) ->
             end;
         Error -> Error
     end.
-
-node_healthy(Node) when Node =:= node() -> true;
-node_healthy(Node) -> net_adm:ping(Node) =:= pong.
 
 execute([], []) -> ok;
 execute([], Errors) -> {error, {rebalance_failed, lists:reverse(Errors)}};
@@ -92,7 +89,7 @@ refresh_and_balance_leaders(Catalog, Limit) ->
         {ok, #{nodes := NodeRecords, databases := Databases}} ->
             HealthyNodes = [Node || #{state := active,
                                       server_id := {_, Node}} <- NodeRecords,
-                                    node_healthy(Node)],
+                                    erlite_node_health:healthy(Node)],
             balance_leaders(Databases, HealthyNodes, Limit);
         Error -> Error
     end.

@@ -1,6 +1,9 @@
 -module(erlite_raft_applier).
 
--export([catch_up/3, catch_up/4, submit_and_apply/4]).
+-export([catch_up/3, catch_up/4]).
+-ifdef(TEST).
+-export([submit_and_apply/4]).
+-endif.
 
 -spec catch_up(term(), pid(), timeout()) ->
     {ok, non_neg_integer()} | {error, term()} | {timeout, term()}.
@@ -50,6 +53,7 @@ catch_up_through(ServerId, Owner, RaftIndex, Term, RequiredCommandIndex,
         {error, _Reason} = Error -> Error
     end.
 
+-ifdef(TEST).
 -spec submit_and_apply(term(), erlite_raft_command:command(), pid(), timeout()) ->
     {ok, non_neg_integer(), term()} | {error, term()} | {timeout, term()}.
 submit_and_apply(ServerId, Command, Owner, Timeout) ->
@@ -64,6 +68,7 @@ submit_and_apply(ServerId, Command, Owner, Timeout) ->
             end;
         Other -> Other
     end.
+-endif.
 
 apply_entries(_Owner, AppliedIndex, []) ->
     {ok, AppliedIndex};
