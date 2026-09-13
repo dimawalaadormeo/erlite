@@ -12,7 +12,7 @@ The initial SQL policy is intentionally narrow. It accepts parameterized `INSERT
 
 `erlite_raft_machine` is a pure `ra_machine`. It retains validated transaction commands with their authoritative Raft index and term and performs no SQLite side effects. It releases Ra's log cursor with machine state containing the retained recovery ledger. A coordinated checkpoint first catches up every replica and creates and verifies a runtime-compatible SQLite snapshot for each member; only the committed checkpoint then removes covered ledger entries. Requests below the retained floor receive `snapshot_required` instead of incomplete replay data.
 
-`erlite_raft_applier` queries committed machine state and atomically applies missing transactions through the serialized SQLite owner. A successful write reply requires both Raft commit and leader SQLite application through the returned commit index. Missed application is recovered from the SQLite durable index after reopen.
+`erlite_raft_applier` queries committed machine state and atomically applies missing transactions through the serialized SQLite owner. A successful write reply requires both Raft commit and leader SQLite application through the returned commit index. Missed application is recovered from the SQLite durable index after reopen. Each active SQLite owner also owns a bounded pool of permanently query-only reader connections. After the leader barrier and write-owner catch-up complete, the database controller dispatches standalone SQL to an available reader and remains available while the query executes. The global `erlite_sqlite` settings default to one reader and a 64-request waiting queue per replica; reader count is capped at eight, and a full queue returns `read_pool_overloaded`.
 
 Phase 3 adds `erlite_raft_database` as the single-database HA boundary. Its replica map associates each Ra server ID with the SQLite owner on that member. Writes may enter through any available Ra member, but SQLite catch-up and acknowledgement are routed to the leader returned by Ra. Consistent reads first execute a Ra quorum-confirmed barrier, catch the leader's SQLite owner up through that barrier, and only then query SQLite.
 
@@ -135,6 +135,13 @@ The `esqlite` backend normalizes SQLite `NULL` to the Erlite atom `null`, preser
 Database IDs are never escaped into filenames. The filename is `db-<sha256>.sqlite`, where the digest is the lowercase SHA-256 of the complete ID. The catalog will retain the ID-to-database relationship in later phases; filenames are deliberately opaque.
 
 Creation uses exclusive file creation to prevent accidental replacement and restricts the resulting file to owner access. Opening and deletion reject symbolic links and non-regular files. Deletion is idempotent and also removes SQLite WAL and shared-memory artifacts. Managed lifecycle calls go through `erlite_sqlite_databases`; deleting an open database first synchronously closes its owner and SQLite connection.
+
+Managed write connections enable and verify WAL journal mode and
+`synchronous=FULL` whenever they are created or reopened. Each owner also
+manages a bounded pool of query-only SQLite connections. The default is one
+reader and 64 queued requests per replica, with an eight-reader hard cap; pool
+configuration is global in this initial implementation. The rationale and
+lifecycle consequences are recorded in ADR 0008.
 
 Every newly created managed database is initialized with Erlite's internal replica metadata and transaction-ID registry. `erlite_sqlite_schema` owns its format version, durable applied Raft index, and durable command hashes. First application records the transaction ID and mutations atomically; a retry with the same ID and hash skips mutations while advancing the new Raft index, and reuse with different content becomes a deterministic no-op conflict. Replicated application uses the supervised owner described below to enforce single-file serialization.
 

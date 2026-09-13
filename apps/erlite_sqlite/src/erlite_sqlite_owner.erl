@@ -1,7 +1,9 @@
 -module(erlite_sqlite_owner).
 -behaviour(gen_server).
 
--export([start_link/2, close/1, execute/3, query/3, readonly_query/3, transaction/2,
+-export([start_link/2, close/1, execute/3, query/3, readonly_query/3,
+         dispatch_read/4, read_worker_pids/1, transaction/2,
+         read_pool_status/1,
          last_applied_index/1, schema_version/1, migration_history/1,
          migration_status/4,
          transaction_status/3, apply_committed/6, apply_committed/7,
@@ -14,7 +16,16 @@
 -export([readonly_query_connection/3]).
 -endif.
 
--record(state, {connection :: erlite_sqlite:connection()}).
+-define(MAX_READ_WORKERS, 8).
+-define(MAX_READ_QUEUE, 65536).
+
+-record(state, {connection :: erlite_sqlite:connection(),
+                readers = [] :: [pid()],
+                available = [] :: [pid()],
+                busy = #{} :: #{pid() => {reference(), gen_server:from()}},
+                queue = {[], []} :: queue:queue(),
+                queue_limit = 64 :: non_neg_integer(),
+                closing = undefined :: undefined | gen_server:from()}).
 
 -spec start_link(file:filename_all(), binary()) -> gen_server:start_ret().
 start_link(StorageRoot, DatabaseId) ->
@@ -22,7 +33,7 @@ start_link(StorageRoot, DatabaseId) ->
 
 -spec close(pid()) -> ok.
 close(Pid) ->
-    gen_server:stop(Pid).
+    gen_server:call(Pid, close, infinity).
 
 -spec execute(pid(), binary(), erlite_sqlite_adapter:params()) ->
     {ok, erlite_sqlite_adapter:execute_result()} | {error, term()}.
@@ -38,6 +49,19 @@ query(Pid, Sql, Params) ->
     {ok, erlite_sqlite_adapter:query_result()} | {error, term()}.
 readonly_query(Pid, Sql, Params) ->
     gen_server:call(Pid, {readonly_query, Sql, Params}, infinity).
+
+-spec dispatch_read(pid(), binary(), erlite_sqlite_adapter:params(),
+                    gen_server:from()) -> ok.
+dispatch_read(Pid, Sql, Params, ReplyTo) ->
+    gen_server:call(Pid, {dispatch_read, Sql, Params, ReplyTo}, infinity).
+
+-spec read_worker_pids(pid()) -> [pid()].
+read_worker_pids(Pid) ->
+    gen_server:call(Pid, read_worker_pids, infinity).
+
+-spec read_pool_status(pid()) -> map().
+read_pool_status(Pid) ->
+    gen_server:call(Pid, read_pool_status, infinity).
 
 -spec transaction(pid(), [erlite_sqlite_adapter:statement()]) ->
     {ok, [erlite_sqlite_adapter:statement_result()]} | {error, term()}.
@@ -101,8 +125,27 @@ snapshot_into(Pid, Destination) ->
     gen_server:call(Pid, {snapshot_into, Destination}, infinity).
 
 init({StorageRoot, DatabaseId}) ->
-    case erlite_sqlite_database:open(StorageRoot, DatabaseId) of
-        {ok, Connection} -> {ok, #state{connection = Connection}};
+    process_flag(trap_exit, true),
+    case erlite_sqlite_database:open_writer(StorageRoot, DatabaseId) of
+        {ok, Connection} ->
+            case read_pool_config() of
+                {ok, WorkerCount, QueueLimit} ->
+                    case start_readers(StorageRoot, DatabaseId, WorkerCount,
+                                       []) of
+                        {ok, Readers} ->
+                            {ok, #state{connection = Connection,
+                                        readers = Readers,
+                                        available = Readers,
+                                        queue_limit = QueueLimit}};
+                        {error, Reason} ->
+                            _ = erlite_sqlite:close(Connection),
+                            {stop, {shutdown,
+                                    {read_worker_start_failed, Reason}}}
+                    end;
+                {error, Reason} ->
+                    _ = erlite_sqlite:close(Connection),
+                    {stop, {shutdown, Reason}}
+            end;
         {error, Reason} -> {stop, {shutdown, Reason}}
     end.
 
@@ -110,12 +153,28 @@ handle_call({execute, Sql, Params}, _From, State = #state{connection = Connectio
     {reply, erlite_sqlite:execute(Connection, Sql, Params), State};
 handle_call({query, Sql, Params}, _From, State = #state{connection = Connection}) ->
     {reply, erlite_sqlite:query(Connection, Sql, Params), State};
-handle_call({readonly_query, Sql, Params}, _From,
-            State = #state{connection = Connection}) ->
-    case readonly_query_connection(Connection, Sql, Params) of
-        {ok, Result} -> {reply, Result, State};
-        {fatal, Reason} -> {stop, Reason, State}
-    end;
+handle_call({readonly_query, Sql, Params}, From,
+            State) ->
+    {noreply, enqueue_read(Sql, Params, From, State)};
+handle_call({dispatch_read, Sql, Params, ReplyTo}, _From,
+            State) ->
+    {reply, ok, enqueue_read(Sql, Params, ReplyTo, State)};
+handle_call(read_worker_pids, _From, State = #state{readers = Readers}) ->
+    {reply, Readers, State};
+handle_call(read_pool_status, _From,
+            State = #state{readers = Readers, busy = Busy, queue = Queue,
+                           queue_limit = QueueLimit}) ->
+    {reply, #{workers => length(Readers), busy => map_size(Busy),
+              queued => queue:len(Queue), queue_limit => QueueLimit}, State};
+handle_call(close, _From,
+            State = #state{busy = Busy, queue = Queue})
+  when map_size(Busy) =:= 0 ->
+    {empty, _} = queue:out(Queue),
+    {stop, normal, ok, State};
+handle_call(close, From, State = #state{closing = undefined}) ->
+    {noreply, State#state{closing = From}};
+handle_call(close, _From, State) ->
+    {reply, {error, owner_closing}, State};
 handle_call({transaction, Statements}, _From, State = #state{connection = Connection}) ->
     {reply, erlite_sqlite:transaction(Connection, Statements), State};
 handle_call(last_applied_index, _From, State = #state{connection = Connection}) ->
@@ -175,13 +234,117 @@ handle_call({snapshot_into, Destination}, _From,
 handle_cast(_Request, State) ->
     {noreply, State}.
 
+handle_info({read_complete, Reader, JobRef, Result},
+            State = #state{busy = Busy}) ->
+    case maps:find(Reader, Busy) of
+        {ok, {JobRef, ReplyTo}} ->
+            gen_server:reply(ReplyTo, Result),
+            maybe_finish_close(
+              reader_available(Reader,
+                               State#state{busy = maps:remove(Reader, Busy)}));
+        _ ->
+            {noreply, State}
+    end;
+handle_info({'EXIT', Reader, Reason}, State = #state{readers = Readers}) ->
+    case lists:member(Reader, Readers) of
+        true ->
+            reply_pending({error, {read_worker_failed, Reason}}, State),
+            {stop, {read_worker_failed, Reason}, State};
+        false ->
+            reply_pending({error, {owner_stopped, Reason}}, State),
+            {stop, Reason, State}
+    end;
 handle_info(_Info, State) ->
     {noreply, State}.
 
-terminate(_Reason, #state{connection = Connection}) ->
+terminate(_Reason, #state{connection = Connection, readers = Readers}) ->
+    lists:foreach(fun close_reader/1, Readers),
     _ = erlite_sqlite:close(Connection),
     ok.
 
+read_pool_config() ->
+    WorkerCount = application:get_env(erlite_sqlite, read_worker_count, 1),
+    QueueLimit = application:get_env(erlite_sqlite, read_queue_limit, 64),
+    case {WorkerCount, QueueLimit} of
+        {Workers, Limit}
+          when is_integer(Workers), Workers >= 1,
+               Workers =< ?MAX_READ_WORKERS,
+               is_integer(Limit), Limit >= 0, Limit =< ?MAX_READ_QUEUE ->
+            {ok, Workers, Limit};
+        _ ->
+            {error, {invalid_read_pool_config, WorkerCount, QueueLimit}}
+    end.
+
+start_readers(_StorageRoot, _DatabaseId, 0, Readers) ->
+    {ok, lists:reverse(Readers)};
+start_readers(StorageRoot, DatabaseId, Count, Readers) ->
+    case erlite_sqlite_reader:start_link(StorageRoot, DatabaseId) of
+        {ok, Reader} ->
+            start_readers(StorageRoot, DatabaseId, Count - 1,
+                          [Reader | Readers]);
+        {error, Reason} ->
+            lists:foreach(fun close_reader/1, Readers),
+            {error, Reason}
+    end.
+
+enqueue_read(_Sql, _Params, ReplyTo,
+             State = #state{closing = Closing}) when Closing =/= undefined ->
+    gen_server:reply(ReplyTo, {error, owner_closing}),
+    State;
+enqueue_read(Sql, Params, ReplyTo,
+             State = #state{available = [Reader | Rest], busy = Busy}) ->
+    JobRef = make_ref(),
+    ok = erlite_sqlite_reader:query(Reader, Sql, Params, self(), JobRef),
+    State#state{available = Rest,
+                busy = Busy#{Reader => {JobRef, ReplyTo}}};
+enqueue_read(Sql, Params, ReplyTo,
+             State = #state{queue = Queue, queue_limit = Limit}) ->
+    case queue:len(Queue) < Limit of
+        true -> State#state{queue = queue:in({Sql, Params, ReplyTo}, Queue)};
+        false ->
+            gen_server:reply(ReplyTo, {error, read_pool_overloaded}),
+            State
+    end.
+
+reader_available(Reader, State = #state{queue = Queue, busy = Busy}) ->
+    case queue:out(Queue) of
+        {{value, {Sql, Params, ReplyTo}}, Rest} ->
+            JobRef = make_ref(),
+            ok = erlite_sqlite_reader:query(
+                   Reader, Sql, Params, self(), JobRef),
+            State#state{queue = Rest,
+                        busy = Busy#{Reader => {JobRef, ReplyTo}}};
+        {empty, _} ->
+            State#state{available = State#state.available ++ [Reader]}
+    end.
+
+maybe_finish_close(State = #state{closing = undefined}) ->
+    {noreply, State};
+maybe_finish_close(State = #state{closing = CloseFrom, busy = Busy,
+                                  queue = Queue}) ->
+    case {map_size(Busy), queue:is_empty(Queue)} of
+        {0, true} ->
+            gen_server:reply(CloseFrom, ok),
+            {stop, normal, State#state{closing = undefined}};
+        _ -> {noreply, State}
+    end.
+
+reply_pending(Error, #state{busy = Busy, queue = Queue}) ->
+    lists:foreach(
+      fun({_Reader, {_JobRef, ReplyTo}}) -> gen_server:reply(ReplyTo, Error) end,
+      maps:to_list(Busy)),
+    lists:foreach(
+      fun({_Sql, _Params, ReplyTo}) -> gen_server:reply(ReplyTo, Error) end,
+      queue:to_list(Queue)).
+
+close_reader(Reader) ->
+    try erlite_sqlite_reader:close(Reader)
+    catch
+        exit:noproc -> ok;
+        exit:{noproc, _Call} -> ok
+    end.
+
+-ifdef(TEST).
 readonly_query_connection(Connection, Sql, Params) ->
     case erlite_sqlite:execute(Connection, <<"PRAGMA query_only = ON">>, []) of
         {ok, _} ->
@@ -195,3 +358,4 @@ readonly_query_connection(Connection, Sql, Params) ->
         {error, Reason} ->
             {ok, {error, {query_only_enable_failed, Reason}}}
     end.
+-endif.

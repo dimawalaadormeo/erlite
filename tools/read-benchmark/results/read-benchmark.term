@@ -1,0 +1,686 @@
+#{otp_release => "29",concurrency => 16,duration_seconds => 10,
+  format_version => 1,
+  limitations =>
+      [shared_host_cpu,shared_host_storage,
+       bridge_network_not_production_network],
+  profiles => [point,range_aggregate,recursive,write_heavy],
+  queue_limit => 64,seed_rows => 50000,
+  topology => three_containers_single_host,
+  variants =>
+      [#{'after' =>
+             #{'erlite_a@node-a' =>
+                   #{process_count => 141,database_bytes => 1126400,
+                     database_status =>
+                         #{mode => active,sqlite_bytes => 1208320,
+                           database_id => <<"read-bench-1">>,
+                           controller_memory_bytes => 143320,
+                           open_sqlite_readers => 3,open_sqlite_replicas => 3,
+                           raft_members => 3,
+                           raft_server_memory_bytes => 14244908,
+                           sqlite_owner_memory_bytes => 49632,
+                           sqlite_reader_memory_bytes => 49280},
+                     file_descriptors => 31,memory_bytes => 51285952,
+                     process_memory_bytes => 22781000,shm_bytes => 32768,
+                     wal_bytes => 4132392},
+               'erlite_b@node-b' =>
+                   #{process_count => 142,database_bytes => 40960,
+                     database_status => #{},file_descriptors => 32,
+                     memory_bytes => 50988168,
+                     process_memory_bytes => 22610112,shm_bytes => 32768,
+                     wal_bytes => 585072},
+               'erlite_c@node-c' =>
+                   #{process_count => 142,database_bytes => 40960,
+                     database_status => #{},file_descriptors => 32,
+                     memory_bytes => 51039904,
+                     process_memory_bytes => 22639944,shm_bytes => 32768,
+                     wal_bytes => 585072}},
+         before =>
+             #{'erlite_a@node-a' =>
+                   #{process_count => 141,database_bytes => 40960,
+                     database_status =>
+                         #{mode => active,sqlite_bytes => 122880,
+                           database_id => <<"read-bench-1">>,
+                           controller_memory_bytes => 14264,
+                           open_sqlite_readers => 3,open_sqlite_replicas => 3,
+                           raft_members => 3,
+                           raft_server_memory_bytes => 156812,
+                           sqlite_owner_memory_bytes => 49328,
+                           sqlite_reader_memory_bytes => 41376},
+                     file_descriptors => 30,memory_bytes => 43115424,
+                     process_memory_bytes => 15063264,shm_bytes => 32768,
+                     wal_bytes => 585072},
+               'erlite_b@node-b' =>
+                   #{process_count => 142,database_bytes => 40960,
+                     database_status => #{},file_descriptors => 32,
+                     memory_bytes => 42874760,
+                     process_memory_bytes => 14997184,shm_bytes => 32768,
+                     wal_bytes => 585072},
+               'erlite_c@node-c' =>
+                   #{process_count => 142,database_bytes => 40960,
+                     database_status => #{},file_descriptors => 32,
+                     memory_bytes => 42958152,
+                     process_memory_bytes => 15057248,shm_bytes => 32768,
+                     wal_bytes => 585072}},
+         checkpoint_probe =>
+             #{'after' =>
+                   #{'erlite_a@node-a' =>
+                         #{process_count => 141,database_bytes => 1150976,
+                           database_status =>
+                               #{mode => active,sqlite_bytes => 1232896,
+                                 database_id => <<"read-bench-1">>,
+                                 controller_memory_bytes => 113432,
+                                 open_sqlite_readers => 3,
+                                 open_sqlite_replicas => 3,raft_members => 3,
+                                 raft_server_memory_bytes => 14245060,
+                                 sqlite_owner_memory_bytes => 50240,
+                                 sqlite_reader_memory_bytes => 49280},
+                           file_descriptors => 31,memory_bytes => 51256696,
+                           process_memory_bytes => 22752696,
+                           shm_bytes => 32768,wal_bytes => 4132392},
+                     'erlite_b@node-b' =>
+                         #{process_count => 142,database_bytes => 40960,
+                           database_status => #{},file_descriptors => 32,
+                           memory_bytes => 51001704,
+                           process_memory_bytes => 22622896,
+                           shm_bytes => 32768,wal_bytes => 585072},
+                     'erlite_c@node-c' =>
+                         #{process_count => 142,database_bytes => 40960,
+                           database_status => #{},file_descriptors => 32,
+                           memory_bytes => 51034208,
+                           process_memory_bytes => 22633880,
+                           shm_bytes => 32768,wal_bytes => 585072}},
+               result =>
+                   {ok,#{columns => [<<"busy">>,<<"log">>,<<"checkpointed">>],
+                         rows => [[0,769,769]]}},
+               before =>
+                   #{'erlite_a@node-a' =>
+                         #{process_count => 141,database_bytes => 1126400,
+                           database_status =>
+                               #{mode => active,sqlite_bytes => 1208320,
+                                 database_id => <<"read-bench-1">>,
+                                 controller_memory_bytes => 148944,
+                                 open_sqlite_readers => 3,
+                                 open_sqlite_replicas => 3,raft_members => 3,
+                                 raft_server_memory_bytes => 14244908,
+                                 sqlite_owner_memory_bytes => 49936,
+                                 sqlite_reader_memory_bytes => 49280},
+                           file_descriptors => 31,memory_bytes => 51296784,
+                           process_memory_bytes => 22791064,
+                           shm_bytes => 32768,wal_bytes => 4132392},
+                     'erlite_b@node-b' =>
+                         #{process_count => 142,database_bytes => 40960,
+                           database_status => #{},file_descriptors => 32,
+                           memory_bytes => 51014488,
+                           process_memory_bytes => 22635272,
+                           shm_bytes => 32768,wal_bytes => 585072},
+                     'erlite_c@node-c' =>
+                         #{process_count => 142,database_bytes => 40960,
+                           database_status => #{},file_descriptors => 32,
+                           memory_bytes => 51032616,
+                           process_memory_bytes => 22632472,
+                           shm_bytes => 32768,wal_bytes => 585072}},
+               duration_us => 2514},
+         failure_probe =>
+             #{failover_us => 11197809,failover_write => ok,
+               follower =>
+                   {erlite_db_f95793298577840952feaad900652e75d6ab3afa67eaae1473fa6bac129ab7c0_g1_r2,
+                       'erlite_b@node-b'},
+               follower_loss_write => ok,follower_loss_write_us => 9576,
+               leader =>
+                   {erlite_db_f95793298577840952feaad900652e75d6ab3afa67eaae1473fa6bac129ab7c0_g1_r1,
+                       'erlite_a@node-a'},
+               restart_follower => ok,restart_old_leader => ok,
+               stop_follower => ok,stop_leader => ok},
+         lifecycle_probe =>
+             #{cool => ok,cool_us => 10876,reactivate => ok,
+               reactivate_us => 8006,snapshot => ok,snapshot_us => 20578},
+         profile_results =>
+             #{point =>
+                   #{reads =>
+                         #{max_us => 99907,mean_us => 6996,min_us => 3969,
+                           p50_us => 6521,p95_us => 8009,p99_us => 25209,
+                           samples => 3840},
+                     writes =>
+                         #{max_us => 125971,mean_us => 108451,min_us => 7037,
+                           p50_us => 110593,p95_us => 119291,p99_us => 122604,
+                           samples => 1236},
+                     errors => #{}},
+               range_aggregate =>
+                   #{reads =>
+                         #{max_us => 105321,mean_us => 7616,min_us => 5947,
+                           p50_us => 6943,p95_us => 8140,p99_us => 27878,
+                           samples => 3840},
+                     writes =>
+                         #{max_us => 119981,mean_us => 107818,min_us => 5959,
+                           p50_us => 110232,p95_us => 116010,p99_us => 118494,
+                           samples => 1221},
+                     errors => #{}},
+               recursive =>
+                   #{reads =>
+                         #{max_us => 113976,mean_us => 23535,min_us => 21241,
+                           p50_us => 22521,p95_us => 25930,p99_us => 41477,
+                           samples => 2560},
+                     writes =>
+                         #{max_us => 121766,mean_us => 108667,min_us => 7712,
+                           p50_us => 112072,p95_us => 117525,p99_us => 119202,
+                           samples => 926},
+                     errors => #{}},
+               write_heavy =>
+                   #{reads =>
+                         #{max_us => 102850,mean_us => 9019,min_us => 5763,
+                           p50_us => 6397,p95_us => 10254,p99_us => 84495,
+                           samples => 320},
+                     writes =>
+                         #{max_us => 124857,mean_us => 111133,min_us => 6414,
+                           p50_us => 112282,p95_us => 117766,p99_us => 121112,
+                           samples => 1422},
+                     errors => #{}}},
+         readers => 1},
+       #{'after' =>
+             #{'erlite_a@node-a' =>
+                   #{process_count => 148,database_bytes => 3444736,
+                     database_status =>
+                         #{mode => active,sqlite_bytes => 1245184,
+                           database_id => <<"read-bench-2">>,
+                           controller_memory_bytes => 109816,
+                           open_sqlite_readers => 6,open_sqlite_replicas => 3,
+                           raft_members => 3,
+                           raft_server_memory_bytes => 9617660,
+                           sqlite_owner_memory_bytes => 81040,
+                           sqlite_reader_memory_bytes => 88784},
+                     file_descriptors => 38,memory_bytes => 56676400,
+                     process_memory_bytes => 27604840,shm_bytes => 65536,
+                     wal_bytes => 4161264},
+               'erlite_b@node-b' =>
+                   #{process_count => 148,database_bytes => 638976,
+                     database_status => #{},file_descriptors => 37,
+                     memory_bytes => 53227456,
+                     process_memory_bytes => 24263560,shm_bytes => 65536,
+                     wal_bytes => 585072},
+               'erlite_c@node-c' =>
+                   #{process_count => 148,database_bytes => 1175552,
+                     database_status => #{},file_descriptors => 37,
+                     memory_bytes => 54657624,
+                     process_memory_bytes => 25675712,shm_bytes => 65536,
+                     wal_bytes => 4733944}},
+         before =>
+             #{'erlite_a@node-a' =>
+                   #{process_count => 148,database_bytes => 2322432,
+                     database_status =>
+                         #{mode => active,sqlite_bytes => 122880,
+                           database_id => <<"read-bench-2">>,
+                           controller_memory_bytes => 17256,
+                           open_sqlite_readers => 6,open_sqlite_replicas => 3,
+                           raft_members => 3,
+                           raft_server_memory_bytes => 273172,
+                           sqlite_owner_memory_bytes => 75848,
+                           sqlite_reader_memory_bytes => 82752},
+                     file_descriptors => 36,memory_bytes => 50473176,
+                     process_memory_bytes => 21851568,shm_bytes => 65536,
+                     wal_bytes => 601584},
+               'erlite_b@node-b' =>
+                   #{process_count => 148,database_bytes => 638976,
+                     database_status => #{},file_descriptors => 37,
+                     memory_bytes => 45483656,
+                     process_memory_bytes => 17003664,shm_bytes => 65536,
+                     wal_bytes => 585072},
+               'erlite_c@node-c' =>
+                   #{process_count => 148,database_bytes => 1175552,
+                     database_status => #{},file_descriptors => 37,
+                     memory_bytes => 51177232,
+                     process_memory_bytes => 22667176,shm_bytes => 65536,
+                     wal_bytes => 4733944}},
+         checkpoint_probe =>
+             #{'after' =>
+                   #{'erlite_a@node-a' =>
+                         #{process_count => 148,database_bytes => 3448832,
+                           database_status =>
+                               #{mode => active,sqlite_bytes => 1249280,
+                                 database_id => <<"read-bench-2">>,
+                                 controller_memory_bytes => 122136,
+                                 open_sqlite_readers => 6,
+                                 open_sqlite_replicas => 3,raft_members => 3,
+                                 raft_server_memory_bytes => 9617812,
+                                 sqlite_owner_memory_bytes => 81648,
+                                 sqlite_reader_memory_bytes => 88784},
+                           file_descriptors => 38,memory_bytes => 56714080,
+                           process_memory_bytes => 27641408,
+                           shm_bytes => 65536,wal_bytes => 4161264},
+                     'erlite_b@node-b' =>
+                         #{process_count => 148,database_bytes => 638976,
+                           database_status => #{},file_descriptors => 37,
+                           memory_bytes => 53257144,
+                           process_memory_bytes => 24293856,
+                           shm_bytes => 65536,wal_bytes => 585072},
+                     'erlite_c@node-c' =>
+                         #{process_count => 148,database_bytes => 1175552,
+                           database_status => #{},file_descriptors => 37,
+                           memory_bytes => 54658712,
+                           process_memory_bytes => 25676920,
+                           shm_bytes => 65536,wal_bytes => 4733944}},
+               result =>
+                   {ok,#{columns => [<<"busy">>,<<"log">>,<<"checkpointed">>],
+                         rows => [[0,331,331]]}},
+               before =>
+                   #{'erlite_a@node-a' =>
+                         #{process_count => 148,database_bytes => 3444736,
+                           database_status =>
+                               #{mode => active,sqlite_bytes => 1245184,
+                                 database_id => <<"read-bench-2">>,
+                                 controller_memory_bytes => 115976,
+                                 open_sqlite_readers => 6,
+                                 open_sqlite_replicas => 3,raft_members => 3,
+                                 raft_server_memory_bytes => 9617660,
+                                 sqlite_owner_memory_bytes => 81344,
+                                 sqlite_reader_memory_bytes => 88784},
+                           file_descriptors => 38,memory_bytes => 56701808,
+                           process_memory_bytes => 27629792,
+                           shm_bytes => 65536,wal_bytes => 4161264},
+                     'erlite_b@node-b' =>
+                         #{process_count => 148,database_bytes => 638976,
+                           database_status => #{},file_descriptors => 37,
+                           memory_bytes => 53270312,
+                           process_memory_bytes => 24306328,
+                           shm_bytes => 65536,wal_bytes => 585072},
+                     'erlite_c@node-c' =>
+                         #{process_count => 148,database_bytes => 1175552,
+                           database_status => #{},file_descriptors => 37,
+                           memory_bytes => 54674656,
+                           process_memory_bytes => 25691984,
+                           shm_bytes => 65536,wal_bytes => 4733944}},
+               duration_us => 2315},
+         failure_probe =>
+             #{failover_us => 11410474,failover_write => ok,
+               follower =>
+                   {erlite_db_1838395b467dd4e8381e9af3a2b14903eec0babe92e3ea5534cabd3f0eb8efc2_g1_r2,
+                       'erlite_b@node-b'},
+               follower_loss_write => ok,follower_loss_write_us => 9989,
+               leader =>
+                   {erlite_db_1838395b467dd4e8381e9af3a2b14903eec0babe92e3ea5534cabd3f0eb8efc2_g1_r1,
+                       'erlite_a@node-a'},
+               restart_follower => ok,restart_old_leader => ok,
+               stop_follower => ok,stop_leader => ok},
+         lifecycle_probe =>
+             #{cool => ok,cool_us => 9146,reactivate => ok,
+               reactivate_us => 6865,snapshot => ok,snapshot_us => 17910},
+         profile_results =>
+             #{point =>
+                   #{reads =>
+                         #{max_us => 104918,mean_us => 7263,min_us => 5621,
+                           p50_us => 6574,p95_us => 7920,p99_us => 24687,
+                           samples => 3840},
+                     writes =>
+                         #{max_us => 118360,mean_us => 106371,min_us => 5730,
+                           p50_us => 108967,p95_us => 113961,p99_us => 116403,
+                           samples => 1250},
+                     errors => #{}},
+               range_aggregate =>
+                   #{reads =>
+                         #{max_us => 108305,mean_us => 7723,min_us => 5919,
+                           p50_us => 7031,p95_us => 7954,p99_us => 28247,
+                           samples => 3840},
+                     writes =>
+                         #{max_us => 125770,mean_us => 109079,min_us => 5689,
+                           p50_us => 111738,p95_us => 117589,p99_us => 122771,
+                           samples => 1203},
+                     errors => #{}},
+               recursive =>
+                   #{reads =>
+                         #{max_us => 109049,mean_us => 13203,min_us => 10010,
+                           p50_us => 12204,p95_us => 15253,p99_us => 42925,
+                           samples => 3840},
+                     writes =>
+                         #{max_us => 120414,mean_us => 106756,min_us => 6139,
+                           p50_us => 110946,p95_us => 117042,p99_us => 118385,
+                           samples => 1032},
+                     errors => #{}},
+               write_heavy =>
+                   #{reads =>
+                         #{max_us => 104620,mean_us => 9406,min_us => 6224,
+                           p50_us => 6832,p95_us => 9804,p99_us => 85750,
+                           samples => 320},
+                     writes =>
+                         #{max_us => 120499,mean_us => 110513,min_us => 5269,
+                           p50_us => 111961,p95_us => 117369,p99_us => 118921,
+                           samples => 1429},
+                     errors => #{}}},
+         readers => 2},
+       #{'after' =>
+             #{'erlite_a@node-a' =>
+                   #{process_count => 157,database_bytes => 5742592,
+                     database_status =>
+                         #{mode => active,sqlite_bytes => 1232896,
+                           database_id => <<"read-bench-4">>,
+                           controller_memory_bytes => 143496,
+                           open_sqlite_readers => 12,
+                           open_sqlite_replicas => 3,raft_members => 3,
+                           raft_server_memory_bytes => 9464740,
+                           sqlite_owner_memory_bytes => 55744,
+                           sqlite_reader_memory_bytes => 228736},
+                     file_descriptors => 48,memory_bytes => 66782616,
+                     process_memory_bytes => 37125128,shm_bytes => 98304,
+                     wal_bytes => 4177776},
+               'erlite_b@node-b' =>
+                   #{process_count => 156,database_bytes => 1236992,
+                     database_status => #{},file_descriptors => 44,
+                     memory_bytes => 53967728,
+                     process_memory_bytes => 24437336,shm_bytes => 98304,
+                     wal_bytes => 585072},
+               'erlite_c@node-c' =>
+                   #{process_count => 156,database_bytes => 2338816,
+                     database_status => #{},file_descriptors => 44,
+                     memory_bytes => 57497512,
+                     process_memory_bytes => 27937512,shm_bytes => 98304,
+                     wal_bytes => 8878696}},
+         before =>
+             #{'erlite_a@node-a' =>
+                   #{process_count => 157,database_bytes => 4632576,
+                     database_status =>
+                         #{mode => active,sqlite_bytes => 122880,
+                           database_id => <<"read-bench-4">>,
+                           controller_memory_bytes => 21736,
+                           open_sqlite_readers => 12,
+                           open_sqlite_replicas => 3,raft_members => 3,
+                           raft_server_memory_bytes => 273172,
+                           sqlite_owner_memory_bytes => 68232,
+                           sqlite_reader_memory_bytes => 165504},
+                     file_descriptors => 44,memory_bytes => 58832624,
+                     process_memory_bytes => 29676488,shm_bytes => 98304,
+                     wal_bytes => 618096},
+               'erlite_b@node-b' =>
+                   #{process_count => 156,database_bytes => 1236992,
+                     database_status => #{},file_descriptors => 44,
+                     memory_bytes => 47827128,
+                     process_memory_bytes => 18838104,shm_bytes => 98304,
+                     wal_bytes => 585072},
+               'erlite_c@node-c' =>
+                   #{process_count => 156,database_bytes => 2338816,
+                     database_status => #{},file_descriptors => 44,
+                     memory_bytes => 54938008,
+                     process_memory_bytes => 25923032,shm_bytes => 98304,
+                     wal_bytes => 8878696}},
+         checkpoint_probe =>
+             #{'after' =>
+                   #{'erlite_a@node-a' =>
+                         #{process_count => 157,database_bytes => 5767168,
+                           database_status =>
+                               #{mode => active,sqlite_bytes => 1257472,
+                                 database_id => <<"read-bench-4">>,
+                                 controller_memory_bytes => 114168,
+                                 open_sqlite_readers => 12,
+                                 open_sqlite_replicas => 3,raft_members => 3,
+                                 raft_server_memory_bytes => 9464892,
+                                 sqlite_owner_memory_bytes => 56352,
+                                 sqlite_reader_memory_bytes => 228736},
+                           file_descriptors => 48,memory_bytes => 66754552,
+                           process_memory_bytes => 37099016,
+                           shm_bytes => 98304,wal_bytes => 4177776},
+                     'erlite_b@node-b' =>
+                         #{process_count => 156,database_bytes => 1236992,
+                           database_status => #{},file_descriptors => 44,
+                           memory_bytes => 53969600,
+                           process_memory_bytes => 24438584,
+                           shm_bytes => 98304,wal_bytes => 585072},
+                     'erlite_c@node-c' =>
+                         #{process_count => 156,database_bytes => 2338816,
+                           database_status => #{},file_descriptors => 44,
+                           memory_bytes => 57506248,
+                           process_memory_bytes => 27946800,
+                           shm_bytes => 98304,wal_bytes => 8878696}},
+               result =>
+                   {ok,#{columns => [<<"busy">>,<<"log">>,<<"checkpointed">>],
+                         rows => [[0,870,870]]}},
+               before =>
+                   #{'erlite_a@node-a' =>
+                         #{process_count => 157,database_bytes => 5742592,
+                           database_status =>
+                               #{mode => active,sqlite_bytes => 1232896,
+                                 database_id => <<"read-bench-4">>,
+                                 controller_memory_bytes => 104064,
+                                 open_sqlite_readers => 12,
+                                 open_sqlite_replicas => 3,raft_members => 3,
+                                 raft_server_memory_bytes => 9464740,
+                                 sqlite_owner_memory_bytes => 56048,
+                                 sqlite_reader_memory_bytes => 228736},
+                           file_descriptors => 48,memory_bytes => 66728512,
+                           process_memory_bytes => 37074016,
+                           shm_bytes => 98304,wal_bytes => 4177776},
+                     'erlite_b@node-b' =>
+                         #{process_count => 156,database_bytes => 1236992,
+                           database_status => #{},file_descriptors => 44,
+                           memory_bytes => 53968488,
+                           process_memory_bytes => 24437768,
+                           shm_bytes => 98304,wal_bytes => 585072},
+                     'erlite_c@node-c' =>
+                         #{process_count => 156,database_bytes => 2338816,
+                           database_status => #{},file_descriptors => 44,
+                           memory_bytes => 57505536,
+                           process_memory_bytes => 27946384,
+                           shm_bytes => 98304,wal_bytes => 8878696}},
+               duration_us => 2416},
+         failure_probe =>
+             #{failover_us => 11768492,failover_write => ok,
+               follower =>
+                   {erlite_db_08bce635c1aef297bf2a85b6f6dc0a22d6783fe1647bcc8d77614e88644bd264_g1_r2,
+                       'erlite_b@node-b'},
+               follower_loss_write => ok,follower_loss_write_us => 8979,
+               leader =>
+                   {erlite_db_08bce635c1aef297bf2a85b6f6dc0a22d6783fe1647bcc8d77614e88644bd264_g1_r1,
+                       'erlite_a@node-a'},
+               restart_follower => ok,restart_old_leader => ok,
+               stop_follower => ok,stop_leader => ok},
+         lifecycle_probe =>
+             #{cool => ok,cool_us => 9941,reactivate => ok,
+               reactivate_us => 6954,snapshot => ok,snapshot_us => 20585},
+         profile_results =>
+             #{point =>
+                   #{reads =>
+                         #{max_us => 108323,mean_us => 6842,min_us => 3586,
+                           p50_us => 6152,p95_us => 7716,p99_us => 26194,
+                           samples => 3840},
+                     writes =>
+                         #{max_us => 119370,mean_us => 107391,min_us => 5527,
+                           p50_us => 109948,p95_us => 115240,p99_us => 117174,
+                           samples => 1253},
+                     errors => #{}},
+               range_aggregate =>
+                   #{reads =>
+                         #{max_us => 105436,mean_us => 7547,min_us => 4090,
+                           p50_us => 6907,p95_us => 8407,p99_us => 26930,
+                           samples => 3840},
+                     writes =>
+                         #{max_us => 120187,mean_us => 107694,min_us => 7683,
+                           p50_us => 110429,p95_us => 115461,p99_us => 118021,
+                           samples => 1225},
+                     errors => #{}},
+               recursive =>
+                   #{reads =>
+                         #{max_us => 105640,mean_us => 10324,min_us => 5338,
+                           p50_us => 8773,p95_us => 14507,p99_us => 38810,
+                           samples => 3840},
+                     writes =>
+                         #{max_us => 120535,mean_us => 106814,min_us => 5096,
+                           p50_us => 109856,p95_us => 116312,p99_us => 119680,
+                           samples => 1135},
+                     errors => #{}},
+               write_heavy =>
+                   #{reads =>
+                         #{max_us => 104094,mean_us => 9833,min_us => 6060,
+                           p50_us => 7269,p95_us => 9851,p99_us => 85733,
+                           samples => 320},
+                     writes =>
+                         #{max_us => 127746,mean_us => 110606,min_us => 6403,
+                           p50_us => 111595,p95_us => 117445,p99_us => 122634,
+                           samples => 1426},
+                     errors => #{}}},
+         readers => 4},
+       #{'after' =>
+             #{'erlite_a@node-a' =>
+                   #{process_count => 170,database_bytes => 8077312,
+                     database_status =>
+                         #{mode => active,sqlite_bytes => 1236992,
+                           database_id => <<"read-bench-8">>,
+                           controller_memory_bytes => 110392,
+                           open_sqlite_readers => 24,
+                           open_sqlite_replicas => 3,raft_members => 3,
+                           raft_server_memory_bytes => 10619212,
+                           sqlite_owner_memory_bytes => 89808,
+                           sqlite_reader_memory_bytes => 364912},
+                     file_descriptors => 64,memory_bytes => 73601984,
+                     process_memory_bytes => 43348344,shm_bytes => 131072,
+                     wal_bytes => 4181928},
+               'erlite_b@node-b' =>
+                   #{process_count => 168,database_bytes => 1835008,
+                     database_status => #{},file_descriptors => 55,
+                     memory_bytes => 61341840,
+                     process_memory_bytes => 31284552,shm_bytes => 131072,
+                     wal_bytes => 585072},
+               'erlite_c@node-c' =>
+                   #{process_count => 168,database_bytes => 3489792,
+                     database_status => #{},file_descriptors => 55,
+                     memory_bytes => 61093176,
+                     process_memory_bytes => 31029616,shm_bytes => 131072,
+                     wal_bytes => 13015208}},
+         before =>
+             #{'erlite_a@node-a' =>
+                   #{process_count => 171,database_bytes => 6963200,
+                     database_status =>
+                         #{mode => active,sqlite_bytes => 122880,
+                           database_id => <<"read-bench-8">>,
+                           controller_memory_bytes => 22232,
+                           open_sqlite_readers => 24,
+                           open_sqlite_replicas => 3,raft_members => 3,
+                           raft_server_memory_bytes => 273172,
+                           sqlite_owner_memory_bytes => 84616,
+                           sqlite_reader_memory_bytes => 331008},
+                     file_descriptors => 56,memory_bytes => 66248080,
+                     process_memory_bytes => 36434736,shm_bytes => 131072,
+                     wal_bytes => 634608},
+               'erlite_b@node-b' =>
+                   #{process_count => 168,database_bytes => 1835008,
+                     database_status => #{},file_descriptors => 55,
+                     memory_bytes => 53487176,
+                     process_memory_bytes => 23912696,shm_bytes => 131072,
+                     wal_bytes => 585072},
+               'erlite_c@node-c' =>
+                   #{process_count => 168,database_bytes => 3489792,
+                     database_status => #{},file_descriptors => 55,
+                     memory_bytes => 57524576,
+                     process_memory_bytes => 27893776,shm_bytes => 131072,
+                     wal_bytes => 13015208}},
+         checkpoint_probe =>
+             #{'after' =>
+                   #{'erlite_a@node-a' =>
+                         #{process_count => 170,database_bytes => 8081408,
+                           database_status =>
+                               #{mode => active,sqlite_bytes => 1241088,
+                                 database_id => <<"read-bench-8">>,
+                                 controller_memory_bytes => 147480,
+                                 open_sqlite_readers => 24,
+                                 open_sqlite_replicas => 3,raft_members => 3,
+                                 raft_server_memory_bytes => 10619364,
+                                 sqlite_owner_memory_bytes => 90416,
+                                 sqlite_reader_memory_bytes => 364912},
+                           file_descriptors => 64,memory_bytes => 73627168,
+                           process_memory_bytes => 43376280,
+                           shm_bytes => 131072,wal_bytes => 4181928},
+                     'erlite_b@node-b' =>
+                         #{process_count => 168,database_bytes => 1835008,
+                           database_status => #{},file_descriptors => 55,
+                           memory_bytes => 61351240,
+                           process_memory_bytes => 31293304,
+                           shm_bytes => 131072,wal_bytes => 585072},
+                     'erlite_c@node-c' =>
+                         #{process_count => 168,database_bytes => 3489792,
+                           database_status => #{},file_descriptors => 55,
+                           memory_bytes => 61159712,
+                           process_memory_bytes => 31098272,
+                           shm_bytes => 131072,wal_bytes => 13015208}},
+               result =>
+                   {ok,#{columns => [<<"busy">>,<<"log">>,<<"checkpointed">>],
+                         rows => [[0,201,201]]}},
+               before =>
+                   #{'erlite_a@node-a' =>
+                         #{process_count => 170,database_bytes => 8077312,
+                           database_status =>
+                               #{mode => active,sqlite_bytes => 1236992,
+                                 database_id => <<"read-bench-8">>,
+                                 controller_memory_bytes => 127792,
+                                 open_sqlite_readers => 24,
+                                 open_sqlite_replicas => 3,raft_members => 3,
+                                 raft_server_memory_bytes => 10619212,
+                                 sqlite_owner_memory_bytes => 90112,
+                                 sqlite_reader_memory_bytes => 364912},
+                           file_descriptors => 64,memory_bytes => 73608064,
+                           process_memory_bytes => 43357544,
+                           shm_bytes => 131072,wal_bytes => 4181928},
+                     'erlite_b@node-b' =>
+                         #{process_count => 168,database_bytes => 1835008,
+                           database_status => #{},file_descriptors => 55,
+                           memory_bytes => 61363416,
+                           process_memory_bytes => 31305664,
+                           shm_bytes => 131072,wal_bytes => 585072},
+                     'erlite_c@node-c' =>
+                         #{process_count => 168,database_bytes => 3489792,
+                           database_status => #{},file_descriptors => 55,
+                           memory_bytes => 61159096,
+                           process_memory_bytes => 31097840,
+                           shm_bytes => 131072,wal_bytes => 13015208}},
+               duration_us => 2521},
+         failure_probe =>
+             #{failover_us => 11404548,failover_write => ok,
+               follower =>
+                   {erlite_db_e835dc4bdc7d9d4d648fa5d625fb596de66f2479ea0038d5e21a755ae059c80e_g1_r2,
+                       'erlite_b@node-b'},
+               follower_loss_write => ok,follower_loss_write_us => 9273,
+               leader =>
+                   {erlite_db_e835dc4bdc7d9d4d648fa5d625fb596de66f2479ea0038d5e21a755ae059c80e_g1_r1,
+                       'erlite_a@node-a'},
+               restart_follower => ok,restart_old_leader => ok,
+               stop_follower => ok,stop_leader => ok},
+         lifecycle_probe =>
+             #{cool => ok,cool_us => 10037,reactivate => ok,
+               reactivate_us => 8172,snapshot => ok,snapshot_us => 20377},
+         profile_results =>
+             #{point =>
+                   #{reads =>
+                         #{max_us => 107001,mean_us => 7259,min_us => 5486,
+                           p50_us => 6542,p95_us => 7611,p99_us => 27207,
+                           samples => 3840},
+                     writes =>
+                         #{max_us => 122599,mean_us => 109066,min_us => 4888,
+                           p50_us => 111947,p95_us => 116690,p99_us => 121051,
+                           samples => 1219},
+                     errors => #{}},
+               range_aggregate =>
+                   #{reads =>
+                         #{max_us => 107547,mean_us => 7700,min_us => 5949,
+                           p50_us => 6972,p95_us => 8204,p99_us => 25987,
+                           samples => 3840},
+                     writes =>
+                         #{max_us => 120414,mean_us => 108797,min_us => 5048,
+                           p50_us => 111537,p95_us => 116800,p99_us => 119188,
+                           samples => 1207},
+                     errors => #{}},
+               recursive =>
+                   #{reads =>
+                         #{max_us => 116878,mean_us => 12444,min_us => 6005,
+                           p50_us => 11612,p95_us => 19086,p99_us => 37709,
+                           samples => 3840},
+                     writes =>
+                         #{max_us => 127011,mean_us => 110207,min_us => 6040,
+                           p50_us => 113253,p95_us => 119700,p99_us => 122958,
+                           samples => 1026},
+                     errors => #{}},
+               write_heavy =>
+                   #{reads =>
+                         #{max_us => 107116,mean_us => 9737,min_us => 5973,
+                           p50_us => 7096,p95_us => 10631,p99_us => 88326,
+                           samples => 320},
+                     writes =>
+                         #{max_us => 120835,mean_us => 110195,min_us => 5645,
+                           p50_us => 111271,p95_us => 116609,p99_us => 118496,
+                           samples => 1432},
+                     errors => #{}}},
+         readers => 8}],
+  write_percent => 20}.

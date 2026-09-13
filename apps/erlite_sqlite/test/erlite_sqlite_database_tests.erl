@@ -33,7 +33,14 @@ create_open_and_idempotent_delete_test() ->
         {ok, Path} = erlite_sqlite_database:path(Root, DatabaseId),
         {ok, #file_info{mode = Mode}} = file:read_file_info(Path),
         ?assertEqual(0, Mode band 8#077),
-        {ok, Connection} = erlite_sqlite_database:open(Root, DatabaseId),
+        {ok, Connection} = erlite_sqlite_database:open_writer(Root, DatabaseId),
+        ?assertEqual({ok, #{columns => [<<"journal_mode">>],
+                            rows => [[<<"wal">>]]}},
+                     erlite_sqlite:query(
+                       Connection, <<"PRAGMA journal_mode">>, [])),
+        ?assertEqual({ok, #{columns => [<<"synchronous">>], rows => [[2]]}},
+                     erlite_sqlite:query(
+                       Connection, <<"PRAGMA synchronous">>, [])),
         {ok, _} = erlite_sqlite:execute(Connection,
                                         <<"CREATE TABLE test (value TEXT)">>,
                                         []),
@@ -87,4 +94,3 @@ cleanup_root(Root) ->
         {error, enoent} ->
             ok
     end.
-

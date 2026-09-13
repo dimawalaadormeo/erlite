@@ -1,6 +1,7 @@
 -module(erlite_raft_database).
 
--export([write/4, consistent_read/5, catch_up/4, readiness/4,
+-export([write/4, consistent_read/5, prepare_consistent_read/3,
+         catch_up/4, readiness/4,
          checkpoint/7]).
 
 -type replicas() :: #{term() => pid()}.
@@ -58,6 +59,15 @@ migration_status(Owner, Command, CommittedIndex) ->
 -spec consistent_read(term(), binary(), list(), replicas(), timeout()) ->
     {ok, map()} | {error, term()} | {timeout, term()}.
 consistent_read(ServerRef, Sql, Params, Replicas, Timeout) ->
+    case prepare_consistent_read(ServerRef, Replicas, Timeout) of
+        {ok, Owner} ->
+            erlite_sqlite_owner:readonly_query(Owner, Sql, Params);
+        Other -> Other
+    end.
+
+-spec prepare_consistent_read(term(), replicas(), timeout()) ->
+    {ok, pid()} | {error, term()} | {timeout, term()}.
+prepare_consistent_read(ServerRef, Replicas, Timeout) ->
     case erlite_raft_cluster:barrier(ServerRef, Timeout) of
         {ok, Barrier, Leader} ->
             case owner(Leader, Replicas) of
@@ -65,7 +75,7 @@ consistent_read(ServerRef, Sql, Params, Replicas, Timeout) ->
                     case erlite_raft_applier:catch_up(
                            Leader, Owner, Barrier, Timeout) of
                         {ok, _Index} ->
-                            erlite_sqlite_owner:readonly_query(Owner, Sql, Params);
+                            {ok, Owner};
                         Other -> Other
                     end;
                 Error -> Error

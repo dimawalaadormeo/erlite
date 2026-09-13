@@ -2,7 +2,7 @@
 
 -include_lib("kernel/include/file.hrl").
 
--export([path/2, digest/1, create/2, open/2, delete/2]).
+-export([path/2, digest/1, create/2, open/2, open_writer/2, delete/2]).
 
 -define(MAX_DATABASE_ID_BYTES, 1024).
 
@@ -38,6 +38,14 @@ create(StorageRoot, DatabaseId) ->
 open(StorageRoot, DatabaseId) ->
     case path(StorageRoot, DatabaseId) of
         {ok, Path} -> open_path(Path);
+        {error, _Reason} = Error -> Error
+    end.
+
+-spec open_writer(storage_root(), database_id()) ->
+    {ok, erlite_sqlite:connection()} | {error, term()}.
+open_writer(StorageRoot, DatabaseId) ->
+    case open(StorageRoot, DatabaseId) of
+        {ok, Connection} -> configure_writer(Connection);
         {error, _Reason} = Error -> Error
     end.
 
@@ -97,17 +105,65 @@ initialize_file(Path) ->
     end.
 
 initialize_connection(Path, Connection) ->
-    case erlite_sqlite_schema:initialize(Connection) of
-        ok ->
-            case erlite_sqlite:close(Connection) of
-                ok -> ok;
-                {error, Reason} -> {error, {close_failed, Reason}}
+    case configure_writer(Connection) of
+        {ok, Connection} ->
+            case erlite_sqlite_schema:initialize(Connection) of
+                ok ->
+                    case erlite_sqlite:close(Connection) of
+                        ok -> ok;
+                        {error, Reason} -> {error, {close_failed, Reason}}
+                    end;
+                {error, Reason} ->
+                    _ = erlite_sqlite:close(Connection),
+                    _ = delete_path(Path),
+                    {error, {schema_initialization_failed, Reason}}
             end;
         {error, Reason} ->
-            _ = erlite_sqlite:close(Connection),
-            _ = file:delete(Path),
-            {error, {schema_initialization_failed, Reason}}
+            _ = delete_path(Path),
+            {error, {writer_configuration_failed, Reason}}
     end.
+
+configure_writer(Connection) ->
+    case erlite_sqlite:query(Connection, <<"PRAGMA journal_mode = WAL">>, []) of
+        {ok, #{rows := [[Mode]]}} ->
+            case lowercase_binary(Mode) of
+                <<"wal">> -> configure_synchronous(Connection);
+                Other -> close_with_error(
+                           Connection, {unexpected_journal_mode, Other})
+            end;
+        {ok, Result} ->
+            close_with_error(Connection, {unexpected_journal_mode_result,
+                                          Result});
+        {error, Reason} ->
+            close_with_error(Connection, {journal_mode_failed, Reason})
+    end.
+
+configure_synchronous(Connection) ->
+    case erlite_sqlite:execute(
+           Connection, <<"PRAGMA synchronous = FULL">>, []) of
+        {ok, _} ->
+            case erlite_sqlite:query(
+                   Connection, <<"PRAGMA synchronous">>, []) of
+                {ok, #{rows := [[2]]}} -> {ok, Connection};
+                {ok, Result} -> close_with_error(
+                                  Connection,
+                                  {unexpected_synchronous_result, Result});
+                {error, Reason} -> close_with_error(
+                                     Connection,
+                                     {synchronous_verify_failed, Reason})
+            end;
+        {error, Reason} ->
+            close_with_error(Connection, {synchronous_full_failed, Reason})
+    end.
+
+close_with_error(Connection, Reason) ->
+    _ = erlite_sqlite:close(Connection),
+    {error, Reason}.
+
+lowercase_binary(Value) when is_binary(Value) ->
+    unicode:characters_to_binary(string:lowercase(
+                                   unicode:characters_to_list(Value)));
+lowercase_binary(Value) -> Value.
 
 
 open_path(Path) ->
