@@ -200,12 +200,21 @@ handle_call(migration_history, _From, State0) ->
                   Error -> {Error, State}
               end
       end);
-handle_call({query, Sql, Params, Timeout}, _From, State0) ->
-    with_active(State0,
-      fun(State = #{server_ids := ServerIds, replicas := Replicas}) ->
-              {erlite_raft_database:consistent_read(
-                 ServerIds, Sql, Params, Replicas, Timeout), State}
-      end);
+handle_call({query, Sql, Params, Timeout}, From, State0) ->
+    case activate(State0) of
+        {ok, State = #{server_ids := ServerIds, replicas := Replicas}} ->
+            case erlite_raft_database:prepare_consistent_read(
+                   ServerIds, Replicas, Timeout) of
+                {ok, Owner} ->
+                    ok = erlite_sqlite_owner:dispatch_read(
+                           Owner, Sql, Params, From),
+                    {noreply, State};
+                Error ->
+                    {reply, Error, State}
+            end;
+        {error, Reason} ->
+            {reply, {error, Reason}, State0}
+    end;
 handle_call({backup, Generation, BackupRoot}, _From, State0) ->
     with_active(State0,
       fun(State) -> {create_backup(Generation, BackupRoot, State), State} end);
@@ -699,21 +708,39 @@ reopen_replicas(DatabaseId, [{ServerId, Root} | Rest], Expected, Replicas) ->
 database_status(#{database_id := DatabaseId, mode := Mode,
                   server_ids := ServerIds, replicas := Replicas,
                   replica_roots := Roots}) ->
+    ReaderProcesses = sqlite_readers(Replicas),
     #{database_id => DatabaseId, mode => Mode,
       raft_members => length(ServerIds),
       open_sqlite_replicas => map_size(Replicas),
+      open_sqlite_readers => length(ReaderProcesses),
       controller_memory_bytes => process_memory(node(), self()),
       sqlite_owner_memory_bytes => lists:sum(
                                      [process_memory(
                                         element(2, ServerId), Owner)
                                       || {ServerId, Owner} <-
                                              maps:to_list(Replicas)]),
+      sqlite_reader_memory_bytes => lists:sum(
+                                      [process_memory(Node, Reader)
+                                       || {Node, Reader} <- ReaderProcesses]),
       raft_server_memory_bytes => lists:sum(
                                     [raft_server_memory(ServerId)
                                      || ServerId <- ServerIds]),
       sqlite_bytes => lists:sum(
                         [file_size(ServerId, Root, DatabaseId)
                          || {ServerId, Root} <- maps:to_list(Roots)])}.
+
+sqlite_readers(Replicas) ->
+    lists:append(
+      [sqlite_readers(ServerId, Owner)
+       || {ServerId, Owner} <- maps:to_list(Replicas)]).
+
+sqlite_readers(ServerId, Owner) ->
+    try erlite_sqlite_owner:read_worker_pids(Owner) of
+        Readers when is_list(Readers) ->
+            [{element(2, ServerId), Reader} || Reader <- Readers]
+    catch
+        exit:_Reason -> []
+    end.
 
 file_size(ServerId, Root, DatabaseId) ->
     case member_call(ServerId, erlite_sqlite_database, path, [Root, DatabaseId]) of

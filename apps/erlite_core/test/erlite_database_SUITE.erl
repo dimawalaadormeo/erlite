@@ -5,12 +5,14 @@
          catalog_lifecycle_reconciles_interrupted_work/1,
          fleet_migration_canary_batch_and_history/1,
          fleet_migration_failure_pauses_without_schema_advance/1,
+         slow_read_does_not_occupy_database_controller/1,
          external_api_query_transaction_and_control/1]).
 
 all() -> [multiple_database_lifecycle_and_isolation,
           catalog_lifecycle_reconciles_interrupted_work,
           fleet_migration_canary_batch_and_history,
           fleet_migration_failure_pauses_without_schema_advance,
+          slow_read_does_not_occupy_database_controller,
           external_api_query_transaction_and_control].
 
 init_per_suite(Config) ->
@@ -115,6 +117,43 @@ fleet_migration_failure_pauses_without_schema_advance(Config) ->
     {ok, #{rows := []}} = erlite_sqlite_owner:migration_history(Owner),
     {ok, #{rows := [[1]]}} = erlite_databases:query(
                                DatabaseId, <<"SELECT 1">>, [], 15000),
+    ok = erlite_database_lifecycle:delete(DatabaseId),
+    ok.
+
+slow_read_does_not_occupy_database_controller(_Config) ->
+    DatabaseId = <<"phase-read-worker-isolation">>,
+    ok = erlite_database_lifecycle:create(DatabaseId),
+    [{DatabaseId, Controller}] = ets:lookup(erlite_database_routes, DatabaseId),
+    #{replicas := Replicas} = sys:get_state(Controller),
+    Readers = lists:append(
+                [erlite_sqlite_owner:read_worker_pids(Owner)
+                 || Owner <- maps:values(Replicas)]),
+    lists:foreach(fun(Reader) -> ok = sys:suspend(Reader) end, Readers),
+    Parent = self(),
+    {QueryPid, QueryMonitor} = spawn_monitor(
+                                 fun() ->
+                                         Parent ! {
+                                           query_result,
+                                           erlite_databases:query(
+                                             DatabaseId, <<"SELECT 1">>, [],
+                                             15000)}
+                                 end),
+    try
+        ok = await_any_reader_queue(Readers, 100),
+        {ok, #{database_id := DatabaseId}} = erlite_databases:status(DatabaseId)
+    after
+        lists:foreach(fun(Reader) -> ok = sys:resume(Reader) end, Readers)
+    end,
+    receive
+        {query_result, {ok, #{rows := [[1]]}}} -> ok
+    after 5000 ->
+        error(query_did_not_complete)
+    end,
+    receive
+        {'DOWN', QueryMonitor, process, QueryPid, normal} -> ok
+    after 1000 ->
+        error(query_process_did_not_stop)
+    end,
     ok = erlite_database_lifecycle:delete(DatabaseId),
     ok.
 
@@ -242,10 +281,12 @@ multiple_database_lifecycle_and_isolation(Config) ->
     active = maps:get(mode, Status1),
     3 = maps:get(raft_members, Status1),
     3 = maps:get(open_sqlite_replicas, Status1),
+    3 = maps:get(open_sqlite_readers, Status1),
     true = maps:get(sqlite_bytes, Status1) > 0,
     true = maps:get(sqlite_bytes, Status1) =< 393216,
     true = maps:get(controller_memory_bytes, Status1) =< 262144,
     true = maps:get(sqlite_owner_memory_bytes, Status1) =< 1572864,
+    true = maps:get(sqlite_reader_memory_bytes, Status1) =< 1572864,
     true = maps:get(raft_server_memory_bytes, Status1) =< 3145728,
     ct:pal("Phase 4 active per-database resource measurement: ~p", [Status1]),
     OldRegistry = whereis(erlite_databases),
@@ -263,6 +304,7 @@ multiple_database_lifecycle_and_isolation(Config) ->
     {ok, ColdStatus} = erlite_databases:status(Db1),
     cold = maps:get(mode, ColdStatus),
     0 = maps:get(open_sqlite_replicas, ColdStatus),
+    0 = maps:get(open_sqlite_readers, ColdStatus),
     {ok, #{rows := [[5]]}} = erlite_databases:query(
                                 Db1,
                                 <<"SELECT count(*) FROM sqlite_schema "
@@ -331,6 +373,22 @@ await_process_restart(Name, OldPid, Deadline, _Pid) ->
         false ->
             timer:sleep(10),
             await_process_restart(Name, OldPid, Deadline, whereis(Name))
+    end.
+
+await_any_reader_queue(_Readers, 0) ->
+    {error, read_was_not_dispatched};
+await_any_reader_queue(Readers, Attempts) ->
+    case lists:any(
+           fun(Reader) ->
+                   case process_info(Reader, message_queue_len) of
+                       {message_queue_len, Length} when Length > 0 -> true;
+                       _ -> false
+                   end
+           end, Readers) of
+        true -> ok;
+        false ->
+            timer:sleep(10),
+            await_any_reader_queue(Readers, Attempts - 1)
     end.
 
 await_catalog_state(Catalog, DatabaseId, Expected, Timeout) ->

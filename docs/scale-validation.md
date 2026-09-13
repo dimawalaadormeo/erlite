@@ -67,6 +67,27 @@ failure, catch-up, network, and rebalance measurements above have actually
 run. This document should be extended with dated distributed result summaries
 and links to retained raw reports after each accepted run.
 
+## Three-container read-pool comparison
+
+`tools/read-benchmark/run.sh` builds the current checkout and starts three
+Erlite node containers plus a short-lived benchmark controller. The opt-in
+workload compares configured reader counts with consistent reads and replicated
+writes, and retains versioned raw latency, error, pool, VM, descriptor, and WAL
+measurements. See `tools/read-benchmark/README.md` for configuration and cleanup.
+
+Because all containers share one kernel, CPU, physical storage, and container
+bridge, this is a distributed functional and relative-tuning gate—not the
+separate-host production run required above. A recommendation based on it must
+record host details and raw reports and must not silently change defaults.
+
+The 2026-09-13 extended run found that point and range workloads did not benefit
+materially from larger pools. Four readers did benefit the concurrent recursive
+CPU-heavy profile, while eight regressed relative to four. The general default
+therefore remains one; four is a workload-specific tuning option. Passive
+checkpoints completed with no busy readers, but explicit WAL checkpoint policy
+remains deferred pending a longer write-heavy run. Detailed results and the raw
+term are under `tools/read-benchmark`.
+
 ### 2026-09-11 local staged results
 
 The 1,000, 5,000, and 10,000 tiers passed on OTP 29.0.3, Linux

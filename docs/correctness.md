@@ -115,6 +115,28 @@ Create is all-or-nothing within the Phase 4 local workflow. Rollback records onl
 
 Cooling removes open SQLite handles without changing Ra membership or deleting durable state. Reactivation verifies runtime compatibility before returning the database to active mode. Consistent reads and writes still pass through the Phase 3 barrier and catch-up rules after activation.
 
+Standalone consistent SQL executes on a bounded pool of separate query-only
+SQLite connections.
+The leader barrier and durable write-owner catch-up complete before the query is
+dispatched, so moving SQL execution out of the write owner does not weaken the
+read guarantee. The reader cannot apply Raft commands, update Erlite metadata,
+run migrations, or create snapshots. The write owner owns the reader lifecycle
+and closes it before closing its authoritative connection; cooling, deletion,
+restore, and snapshot replacement therefore cannot leave a reader attached to
+a retired SQLite file. Pool shutdown drains accepted work before closing its
+connections. When every reader and bounded queue slot is occupied, new work is
+rejected with `read_pool_overloaded`; it is never silently dropped. A reader
+failure fails accepted work and stops its owning SQLite owner rather than
+leaving callers without a result.
+
+Managed write connections enable and verify SQLite WAL mode on creation and
+every reopen, and set and verify `synchronous=FULL`. WAL permits reader
+connections to proceed without reverting committed-write serialization: only
+the write owner applies Raft commands and advances the durable applied index.
+Snapshot creation still uses `VACUUM INTO` to publish a standalone image.
+Replacement and deletion close the owner and complete reader pool before
+activating or removing a file, then remove obsolete `-wal` and `-shm` sidecars.
+
 The initial active RF=3 resource budget enforced by Common Test is 256 KiB for the controller, 1.5 MiB across three SQLite owners, 3 MiB across three primary Ra server processes, and 384 KiB across three empty SQLite files. On OTP 29.0.3 in the test profile, the measured values were 42,424 bytes, 49,496 bytes, 147,716 bytes, and 49,152 bytes respectively. These are regression budgets for the measured primary processes, not final whole-VM capacity claims; Phase 14 remains responsible for large-scale validation including auxiliary Ra processes, ETS, timers, descriptors, and loaded-code sharing.
 
 ## Catalog-fenced database lifecycle

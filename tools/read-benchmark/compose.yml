@@ -1,0 +1,47 @@
+services:
+  node-a:
+    build:
+      context: ../..
+      dockerfile: tools/read-benchmark/Dockerfile
+    hostname: node-a
+    command: ["erl", "-sname", "erlite_a", "-setcookie", "erlite-read-benchmark", "-pa", "/opt/read-benchmark/ebin", "-noshell", "-s", "erlite_read_bench_node", "start"]
+    environment: {ERLITE_BENCH_ROOT: /data}
+    volumes: [node-a-data:/data]
+  node-b:
+    build:
+      context: ../..
+      dockerfile: tools/read-benchmark/Dockerfile
+    hostname: node-b
+    command: ["erl", "-sname", "erlite_b", "-setcookie", "erlite-read-benchmark", "-pa", "/opt/read-benchmark/ebin", "-noshell", "-s", "erlite_read_bench_node", "start"]
+    environment: {ERLITE_BENCH_ROOT: /data}
+    volumes: [node-b-data:/data]
+  node-c:
+    build:
+      context: ../..
+      dockerfile: tools/read-benchmark/Dockerfile
+    hostname: node-c
+    command: ["erl", "-sname", "erlite_c", "-setcookie", "erlite-read-benchmark", "-pa", "/opt/read-benchmark/ebin", "-noshell", "-s", "erlite_read_bench_node", "start"]
+    environment: {ERLITE_BENCH_ROOT: /data}
+    volumes: [node-c-data:/data]
+  benchmark:
+    build:
+      context: ../..
+      dockerfile: tools/read-benchmark/Dockerfile
+    hostname: benchmark
+    depends_on: [node-a, node-b, node-c]
+    command: ["erl", "-sname", "benchmark", "-setcookie", "erlite-read-benchmark", "-pa", "/opt/read-benchmark/ebin", "-noshell", "-s", "erlite_read_bench", "main"]
+    environment:
+      ERLITE_BENCH_DURATION_SECONDS: "${ERLITE_BENCH_DURATION_SECONDS:-10}"
+      ERLITE_BENCH_CONCURRENCY: "${ERLITE_BENCH_CONCURRENCY:-16}"
+      ERLITE_BENCH_QUEUE_LIMIT: "${ERLITE_BENCH_QUEUE_LIMIT:-64}"
+      ERLITE_BENCH_READERS: "${ERLITE_BENCH_READERS:-1,2,4,8}"
+      ERLITE_BENCH_WRITE_PERCENT: "${ERLITE_BENCH_WRITE_PERCENT:-20}"
+      ERLITE_BENCH_SEED_ROWS: "${ERLITE_BENCH_SEED_ROWS:-50000}"
+      ERLITE_BENCH_PROFILES: "${ERLITE_BENCH_PROFILES:-point,range_aggregate,recursive,write_heavy}"
+      ERLITE_BENCH_OUTPUT: /results/read-benchmark.term
+    volumes: [./results:/results]
+
+volumes:
+  node-a-data: {}
+  node-b-data: {}
+  node-c-data: {}

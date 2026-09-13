@@ -5,6 +5,8 @@
                 erlite_sqlite_databases]},
   {mod, {erlite_sqlite_app, []}},
   {applications, [kernel, stdlib, crypto, esqlite]},
-  {env, [{adapter, erlite_sqlite_esqlite}]},
+  {env, [{adapter, erlite_sqlite_esqlite},
+         {read_worker_count, 1},
+         {read_queue_limit, 64}]},
   {modules, []}
  ]}.

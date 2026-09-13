@@ -1,0 +1,4 @@
+_build
+.git
+erl_crash.dump
+tools/read-benchmark/results
