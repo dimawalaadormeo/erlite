@@ -264,6 +264,124 @@ invalid_read_pool_configuration_is_rejected_test() ->
         _ = file:del_dir(Root)
     end.
 
+read_timeout_replies_and_frees_worker_after_query_finishes_test() ->
+    with_supervised_database(
+      fun(_Root, _DatabaseId, Owner) ->
+              [Reader] = erlite_sqlite_owner:read_worker_pids(Owner),
+              ok = sys:suspend(Reader),
+              Parent = self(),
+              Caller = spawn_monitor(
+                         fun() ->
+                                 Parent ! {timed_out,
+                                           erlite_sqlite_owner:readonly_query(
+                                             Owner, <<"SELECT 1">>, [], 50)}
+                         end),
+              receive
+                  {timed_out, Result} ->
+                      ?assertEqual({timeout, read_query}, Result)
+              after 1000 ->
+                  error(read_timeout_not_delivered)
+              end,
+              await_worker_down(Caller),
+              ok = sys:resume(Reader),
+              ok = await_pool_status(Owner, 0, 0, 200),
+              ?assertMatch({ok, #{rows := [[1]]}},
+                           erlite_sqlite_owner:readonly_query(
+                             Owner, <<"SELECT 1">>, [], 1000))
+      end).
+
+queued_read_timeout_is_removed_before_reaching_a_reader_test() ->
+    with_read_pool_config(
+      1, 4,
+      fun() ->
+              with_supervised_database(
+                fun(_Root, _DatabaseId, Owner) ->
+                        [Reader] = erlite_sqlite_owner:read_worker_pids(Owner),
+                        ok = sys:suspend(Reader),
+                        Parent = self(),
+                        First = spawn_monitor(
+                                  fun() -> Parent ! {first,
+                                             erlite_sqlite_owner:readonly_query(
+                                               Owner, <<"SELECT 1">>, [])}
+                                  end),
+                        ok = await_message_queue(Reader, 1, 100),
+                        Second = spawn_monitor(
+                                   fun() -> Parent ! {second,
+                                              erlite_sqlite_owner:readonly_query(
+                                                Owner, <<"SELECT 2">>, [], 50)}
+                                   end),
+                        receive
+                            {second, SecondResult} ->
+                                ?assertEqual({timeout, read_query}, SecondResult)
+                        after 1000 ->
+                            error(queued_timeout_not_delivered)
+                        end,
+                        await_worker_down(Second),
+                        ok = await_pool_status(Owner, 1, 0, 100),
+                        ok = sys:resume(Reader),
+                        ?assertMatch({ok, #{rows := [[1]]}},
+                                     receive {first, FirstResult} -> FirstResult
+                                     after 1000 -> error(first_query_timeout)
+                                     end),
+                        await_worker_down(First),
+                        ok = await_pool_status(Owner, 0, 0, 100)
+                end)
+      end).
+
+reader_crash_fails_pending_read_and_stops_owner_test() ->
+    PreviousTrap = process_flag(trap_exit, true),
+    try
+        with_supervised_database(
+          fun(_Root, _DatabaseId, Owner) ->
+                  [Reader] = erlite_sqlite_owner:read_worker_pids(Owner),
+                  ok = sys:suspend(Reader),
+                  Parent = self(),
+                  Caller = spawn_monitor(
+                             fun() -> Parent ! {crashed,
+                                        erlite_sqlite_owner:readonly_query(
+                                          Owner, <<"SELECT 1">>, [])}
+                             end),
+                  ok = await_message_queue(Reader, 1, 100),
+                  exit(Reader, kill),
+                  receive
+                      {crashed, Result} ->
+                          ?assertMatch({error, {read_worker_failed, killed}},
+                                       Result)
+                  after 1000 ->
+                      error(pending_read_not_failed)
+                  end,
+                  await_worker_down(Caller),
+                  wait_until_dead(Owner)
+          end)
+    after
+        _ = process_flag(trap_exit, PreviousTrap)
+    end.
+
+expired_read_is_not_enqueued_after_owner_mailbox_delay_test() ->
+    with_supervised_database(
+      fun(_Root, _DatabaseId, Owner) ->
+              [Reader] = erlite_sqlite_owner:read_worker_pids(Owner),
+              ok = sys:suspend(Reader),
+              ok = sys:suspend(Owner),
+              Parent = self(),
+              Caller = spawn_monitor(
+                         fun() ->
+                                 Parent ! {delayed,
+                                           erlite_sqlite_owner:readonly_query(
+                                             Owner, <<"SELECT 1">>, [], 50)}
+                         end),
+              receive
+                  {delayed, Result} ->
+                      ?assertEqual({timeout, read_query}, Result)
+              after 1000 ->
+                  error(delayed_read_not_timed_out)
+              end,
+              await_worker_down(Caller),
+              ok = sys:resume(Owner),
+              ok = await_pool_status(Owner, 0, 0, 100),
+              ok = sys:resume(Reader)
+      end).
+
 readonly_query_reset_failure_is_fatal_test() ->
     Connection = {erlite_sqlite_query_only_failure_adapter, connection},
     ?assertEqual(

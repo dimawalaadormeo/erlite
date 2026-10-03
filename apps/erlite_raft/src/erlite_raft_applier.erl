@@ -8,8 +8,12 @@
 -spec catch_up(term(), pid(), timeout()) ->
     {ok, non_neg_integer()} | {error, term()} | {timeout, term()}.
 catch_up(ServerId, Owner, Timeout) ->
-    case erlite_raft_cluster:barrier(ServerId, Timeout) of
-        {ok, Barrier, _Leader} -> catch_up(ServerId, Owner, Barrier, Timeout);
+    Deadline = erlite_sqlite_owner:deadline(Timeout),
+    case erlite_raft_cluster:barrier(
+           ServerId, erlite_sqlite_owner:remaining(Deadline)) of
+        {ok, Barrier, _Leader} ->
+            catch_up(ServerId, Owner, Barrier,
+                     erlite_sqlite_owner:remaining(Deadline));
         Other -> Other
     end.
 
@@ -19,26 +23,34 @@ catch_up(ServerId, Owner,
          #{raft_index := RaftIndex, term := Term,
            command_index := RequiredCommandIndex,
            runtime_identity := RuntimeIdentity}, Timeout) ->
-    case erlite_sqlite_owner:verify_runtime(Owner, RuntimeIdentity) of
+    Deadline = erlite_sqlite_owner:deadline(Timeout),
+    case erlite_sqlite_owner:verify_runtime(
+           Owner, RuntimeIdentity, erlite_sqlite_owner:remaining(Deadline)) of
         ok -> catch_up_compatible(ServerId, Owner, RaftIndex, Term,
-                                  RequiredCommandIndex, Timeout);
-        {error, _Reason} = Error -> Error
+                                  RequiredCommandIndex, Deadline);
+        {error, _Reason} = Error -> Error;
+        {timeout, _} = Timeout0 -> Timeout0
     end.
 
 catch_up_compatible(ServerId, Owner, RaftIndex, Term, RequiredCommandIndex,
-                    Timeout) ->
-    case erlite_sqlite_owner:validate_schema(Owner) of
+                    Deadline) ->
+    case erlite_sqlite_owner:validate_schema(
+           Owner, erlite_sqlite_owner:remaining(Deadline)) of
         ok -> catch_up_through(ServerId, Owner, RaftIndex, Term,
-                               RequiredCommandIndex, Timeout);
-        {error, _Reason} = Error -> Error
+                               RequiredCommandIndex, Deadline);
+        {error, _Reason} = Error -> Error;
+        {timeout, _} = Timeout0 -> Timeout0
     end.
 
 catch_up_through(ServerId, Owner, RaftIndex, Term, RequiredCommandIndex,
-                 Timeout) ->
-    case erlite_sqlite_owner:last_applied_index(Owner) of
+                 Deadline) ->
+    case erlite_sqlite_owner:last_applied_index(
+           Owner, erlite_sqlite_owner:remaining(Deadline)) of
+        {timeout, _} = Timeout0 -> Timeout0;
         {ok, AppliedIndex} ->
             case erlite_raft_cluster:committed_entries_after(
-                   ServerId, AppliedIndex, RaftIndex, Term, Timeout) of
+                   ServerId, AppliedIndex, RaftIndex, Term,
+                   erlite_sqlite_owner:remaining(Deadline)) of
                 {ok, Entries} ->
                     case apply_entries(Owner, AppliedIndex, Entries) of
                         {ok, FinalIndex} when FinalIndex >= RequiredCommandIndex ->

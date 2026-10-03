@@ -129,6 +129,18 @@ rejected with `read_pool_overloaded`; it is never silently dropped. A reader
 failure fails accepted work and stops its owning SQLite owner rather than
 leaving callers without a result.
 
+The caller's query timeout is an absolute deadline shared by database
+activation, the leader barrier, catch-up, owner dispatch, and the SQL execution.
+Every sequential step receives only the time that remains. The owner rejects a
+read whose deadline has passed when it reaches the front of its mailbox, so an
+expired request cannot enter the pool. The caller stops waiting at the deadline
+and receives `{timeout, read_query}` (HTTP 504). Controller work already in
+progress may finish later, and its result is discarded. Replay of committed
+writes during catch-up is not interrupted per entry; it stays idempotent and
+resumes from the durable applied index on the next read. A reader already executing SQL cannot be interrupted here: it
+keeps its pool slot until the statement finishes, and its late result is
+discarded.
+
 Managed write connections enable and verify SQLite WAL mode on creation and
 every reopen, and set and verify `synchronous=FULL`. WAL permits reader
 connections to proceed without reverting committed-write serialization: only

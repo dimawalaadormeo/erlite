@@ -1,6 +1,7 @@
 -module(erlite_raft_database).
 
 -export([write/4, consistent_read/5, prepare_consistent_read/3,
+         prepare_consistent_read_until/3,
          catch_up/4, readiness/4,
          checkpoint/7]).
 
@@ -59,21 +60,32 @@ migration_status(Owner, Command, CommittedIndex) ->
 -spec consistent_read(term(), binary(), list(), replicas(), timeout()) ->
     {ok, map()} | {error, term()} | {timeout, term()}.
 consistent_read(ServerRef, Sql, Params, Replicas, Timeout) ->
-    case prepare_consistent_read(ServerRef, Replicas, Timeout) of
+    Deadline = erlite_sqlite_owner:deadline(Timeout),
+    case prepare_consistent_read_until(ServerRef, Replicas, Deadline) of
         {ok, Owner} ->
-            erlite_sqlite_owner:readonly_query(Owner, Sql, Params);
+            erlite_sqlite_owner:readonly_query(
+              Owner, Sql, Params, erlite_sqlite_owner:remaining(Deadline));
         Other -> Other
     end.
 
 -spec prepare_consistent_read(term(), replicas(), timeout()) ->
     {ok, pid()} | {error, term()} | {timeout, term()}.
 prepare_consistent_read(ServerRef, Replicas, Timeout) ->
-    case erlite_raft_cluster:barrier(ServerRef, Timeout) of
+    prepare_consistent_read_until(ServerRef, Replicas,
+                                  erlite_sqlite_owner:deadline(Timeout)).
+
+%% Deadline is an absolute monotonic millisecond value or infinity.
+-spec prepare_consistent_read_until(term(), replicas(), infinity | integer()) ->
+    {ok, pid()} | {error, term()} | {timeout, term()}.
+prepare_consistent_read_until(ServerRef, Replicas, Deadline) ->
+    Remaining = erlite_sqlite_owner:remaining(Deadline),
+    case erlite_raft_cluster:barrier(ServerRef, Remaining) of
         {ok, Barrier, Leader} ->
             case owner(Leader, Replicas) of
                 {ok, Owner} ->
                     case erlite_raft_applier:catch_up(
-                           Leader, Owner, Barrier, Timeout) of
+                           Leader, Owner, Barrier,
+                           erlite_sqlite_owner:remaining(Deadline)) of
                         {ok, _Index} ->
                             {ok, Owner};
                         Other -> Other

@@ -200,20 +200,10 @@ handle_call(migration_history, _From, State0) ->
                   Error -> {Error, State}
               end
       end);
-handle_call({query, Sql, Params, Timeout}, From, State0) ->
-    case activate(State0) of
-        {ok, State = #{server_ids := ServerIds, replicas := Replicas}} ->
-            case erlite_raft_database:prepare_consistent_read(
-                   ServerIds, Replicas, Timeout) of
-                {ok, Owner} ->
-                    ok = erlite_sqlite_owner:dispatch_read(
-                           Owner, Sql, Params, From),
-                    {noreply, State};
-                Error ->
-                    {reply, Error, State}
-            end;
-        {error, Reason} ->
-            {reply, {error, Reason}, State0}
+handle_call({query, Sql, Params, Deadline}, From, State0) ->
+    case erlite_sqlite_owner:remaining(Deadline) of
+        0 -> {reply, {timeout, read_query}, State0};
+        _ -> query_active(Sql, Params, Deadline, From, State0)
     end;
 handle_call({backup, Generation, BackupRoot}, _From, State0) ->
     with_active(State0,
@@ -578,6 +568,24 @@ with_active(State0, Operation) ->
             {Reply, NewState} = Operation(State),
             {reply, Reply, NewState};
         {error, Reason} -> {reply, {error, Reason}, State0}
+    end.
+
+query_active(Sql, Params, Deadline, From, State0) ->
+    case activate(State0) of
+        {ok, State = #{server_ids := ServerIds, replicas := Replicas}} ->
+            case erlite_raft_database:prepare_consistent_read_until(
+                   ServerIds, Replicas, Deadline) of
+                {ok, Owner} ->
+                    case erlite_sqlite_owner:dispatch_read(
+                           Owner, Sql, Params, From, Deadline) of
+                        ok -> {noreply, State};
+                        dispatch_timeout -> {reply, {timeout, read_query}, State}
+                    end;
+                Error ->
+                    {reply, Error, State}
+            end;
+        {error, Reason} ->
+            {reply, {error, Reason}, State0}
     end.
 
 activate(State = #{mode := active}) -> {ok, State};

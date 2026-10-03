@@ -33,7 +33,24 @@ migrate(DatabaseId, Command, Timeout) ->
 migration_history(DatabaseId) -> call_database(DatabaseId, migration_history).
 query(DatabaseId, Sql, Params, Timeout) ->
     observe(database_queries_total, database_query_failures_total,
-            call_database(DatabaseId, {query, Sql, Params, Timeout})).
+            call_query(DatabaseId, Sql, Params, Timeout)).
+
+%% The caller enforces the query deadline itself. Work inside the controller
+%% (activation, barrier, catch-up) can outlive it; the late reply is discarded.
+call_query(DatabaseId, Sql, Params, Timeout) ->
+    case lookup_route(DatabaseId) of
+        {ok, Pid} ->
+            query_call(Pid, {query, Sql, Params,
+                             erlite_sqlite_owner:deadline(Timeout)}, Timeout);
+        Error -> Error
+    end.
+
+query_call(Pid, Request, Timeout) ->
+    try gen_server:call(Pid, Request, Timeout)
+    catch
+        exit:{timeout, _} -> {timeout, read_query};
+        exit:Reason -> {error, {database_unavailable, Reason}}
+    end.
 cool(DatabaseId) -> call_database(DatabaseId, cool).
 backup(DatabaseId, Generation, BackupRoot) ->
     call_database(DatabaseId, {backup, Generation, BackupRoot}).
