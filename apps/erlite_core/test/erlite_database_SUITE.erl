@@ -6,6 +6,7 @@
          fleet_migration_canary_batch_and_history/1,
          fleet_migration_failure_pauses_without_schema_advance/1,
          slow_read_does_not_occupy_database_controller/1,
+         query_timeout_is_enforced_when_replicas_are_blocked/1,
          external_api_query_transaction_and_control/1]).
 
 all() -> [multiple_database_lifecycle_and_isolation,
@@ -13,6 +14,7 @@ all() -> [multiple_database_lifecycle_and_isolation,
           fleet_migration_canary_batch_and_history,
           fleet_migration_failure_pauses_without_schema_advance,
           slow_read_does_not_occupy_database_controller,
+          query_timeout_is_enforced_when_replicas_are_blocked,
           external_api_query_transaction_and_control].
 
 init_per_suite(Config) ->
@@ -154,6 +156,27 @@ slow_read_does_not_occupy_database_controller(_Config) ->
     after 1000 ->
         error(query_process_did_not_stop)
     end,
+    ok = erlite_database_lifecycle:delete(DatabaseId),
+    ok.
+
+query_timeout_is_enforced_when_replicas_are_blocked(_Config) ->
+    DatabaseId = <<"phase-query-deadline">>,
+    ok = erlite_database_lifecycle:create(DatabaseId),
+    [{DatabaseId, Controller}] = ets:lookup(erlite_database_routes, DatabaseId),
+    #{replicas := Replicas} = sys:get_state(Controller),
+    Owners = maps:values(Replicas),
+    lists:foreach(fun(Owner) -> ok = sys:suspend(Owner) end, Owners),
+    try
+        Started = erlang:monotonic_time(millisecond),
+        {timeout, read_query} =
+            erlite_databases:query(DatabaseId, <<"SELECT 1">>, [], 300),
+        Elapsed = erlang:monotonic_time(millisecond) - Started,
+        true = Elapsed < 2000
+    after
+        lists:foreach(fun(Owner) -> ok = sys:resume(Owner) end, Owners)
+    end,
+    {ok, #{rows := [[1]]}} =
+        erlite_databases:query(DatabaseId, <<"SELECT 1">>, [], 5000),
     ok = erlite_database_lifecycle:delete(DatabaseId),
     ok.
 

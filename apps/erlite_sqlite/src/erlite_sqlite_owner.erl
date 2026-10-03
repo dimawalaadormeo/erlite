@@ -2,7 +2,9 @@
 -behaviour(gen_server).
 
 -export([start_link/2, close/1, execute/3, query/3, readonly_query/3,
-         dispatch_read/4, read_worker_pids/1, transaction/2,
+         readonly_query/4, dispatch_read/5, read_worker_pids/1, transaction/2,
+         deadline/1, remaining/1, verify_runtime/3, validate_schema/2,
+         last_applied_index/2,
          read_pool_status/1,
          last_applied_index/1, schema_version/1, migration_history/1,
          migration_status/4,
@@ -22,8 +24,13 @@
 -record(state, {connection :: erlite_sqlite:connection(),
                 readers = [] :: [pid()],
                 available = [] :: [pid()],
-                busy = #{} :: #{pid() => {reference(), gen_server:from()}},
+                busy = #{} :: #{pid() => {reference(), reference()}},
                 queue = {[], []} :: queue:queue(),
+                pending = #{} :: #{reference() => {gen_server:from(),
+                                                   reference() | none,
+                                                   busy | queued}},
+                queued = 0 :: non_neg_integer(),
+                stale = 0 :: non_neg_integer(),
                 queue_limit = 64 :: non_neg_integer(),
                 closing = undefined :: undefined | gen_server:from()}).
 
@@ -48,12 +55,53 @@ query(Pid, Sql, Params) ->
 -spec readonly_query(pid(), binary(), erlite_sqlite_adapter:params()) ->
     {ok, erlite_sqlite_adapter:query_result()} | {error, term()}.
 readonly_query(Pid, Sql, Params) ->
-    gen_server:call(Pid, {readonly_query, Sql, Params}, infinity).
+    readonly_query(Pid, Sql, Params, infinity).
+
+-spec readonly_query(pid(), binary(), erlite_sqlite_adapter:params(),
+                     timeout()) ->
+    {ok, erlite_sqlite_adapter:query_result()} | {error, term()} |
+    {timeout, read_query}.
+readonly_query(Pid, Sql, Params, Timeout) ->
+    bounded_call(Pid, {readonly_query, Sql, Params, deadline(Timeout)},
+                 Timeout, {timeout, read_query}).
 
 -spec dispatch_read(pid(), binary(), erlite_sqlite_adapter:params(),
-                    gen_server:from()) -> ok.
-dispatch_read(Pid, Sql, Params, ReplyTo) ->
-    gen_server:call(Pid, {dispatch_read, Sql, Params, ReplyTo}, infinity).
+                    gen_server:from(), infinity | integer()) ->
+    ok | dispatch_timeout.
+dispatch_read(Pid, Sql, Params, ReplyTo, Deadline) ->
+    bounded_call(Pid, {dispatch_read, Sql, Params, ReplyTo, Deadline},
+                 remaining(Deadline), dispatch_timeout).
+
+%% Absolute monotonic deadlines (milliseconds) travel through the read path so
+%% every sequential step uses the time that is actually left.
+-spec deadline(timeout()) -> infinity | integer().
+deadline(infinity) -> infinity;
+deadline(Timeout) when is_integer(Timeout), Timeout >= 0 ->
+    erlang:monotonic_time(millisecond) + Timeout.
+
+-spec remaining(infinity | integer()) -> timeout().
+remaining(infinity) -> infinity;
+remaining(Deadline) ->
+    max(0, Deadline - erlang:monotonic_time(millisecond)).
+
+bounded_call(Pid, Request, Timeout, Expired) ->
+    try gen_server:call(Pid, Request, Timeout)
+    catch
+        exit:{timeout, _} -> Expired
+    end.
+
+-spec verify_runtime(pid(), term(), timeout()) -> term().
+verify_runtime(Pid, Expected, Timeout) ->
+    bounded_call(Pid, {verify_runtime, Expected}, Timeout,
+                 {timeout, owner_call}).
+
+-spec validate_schema(pid(), timeout()) -> term().
+validate_schema(Pid, Timeout) ->
+    bounded_call(Pid, validate_schema, Timeout, {timeout, owner_call}).
+
+-spec last_applied_index(pid(), timeout()) -> term().
+last_applied_index(Pid, Timeout) ->
+    bounded_call(Pid, last_applied_index, Timeout, {timeout, owner_call}).
 
 -spec read_worker_pids(pid()) -> [pid()].
 read_worker_pids(Pid) ->
@@ -153,23 +201,19 @@ handle_call({execute, Sql, Params}, _From, State = #state{connection = Connectio
     {reply, erlite_sqlite:execute(Connection, Sql, Params), State};
 handle_call({query, Sql, Params}, _From, State = #state{connection = Connection}) ->
     {reply, erlite_sqlite:query(Connection, Sql, Params), State};
-handle_call({readonly_query, Sql, Params}, From,
-            State) ->
-    {noreply, enqueue_read(Sql, Params, From, State)};
-handle_call({dispatch_read, Sql, Params, ReplyTo}, _From,
-            State) ->
-    {reply, ok, enqueue_read(Sql, Params, ReplyTo, State)};
+handle_call({readonly_query, Sql, Params, Deadline}, From, State) ->
+    {noreply, enqueue_read(Sql, Params, From, Deadline, State)};
+handle_call({dispatch_read, Sql, Params, ReplyTo, Deadline}, _From, State) ->
+    {reply, ok, enqueue_read(Sql, Params, ReplyTo, Deadline, State)};
 handle_call(read_worker_pids, _From, State = #state{readers = Readers}) ->
     {reply, Readers, State};
 handle_call(read_pool_status, _From,
-            State = #state{readers = Readers, busy = Busy, queue = Queue,
+            State = #state{readers = Readers, busy = Busy, queued = Queued,
                            queue_limit = QueueLimit}) ->
     {reply, #{workers => length(Readers), busy => map_size(Busy),
-              queued => queue:len(Queue), queue_limit => QueueLimit}, State};
-handle_call(close, _From,
-            State = #state{busy = Busy, queue = Queue})
+              queued => Queued, queue_limit => QueueLimit}, State};
+handle_call(close, _From, State = #state{busy = Busy})
   when map_size(Busy) =:= 0 ->
-    {empty, _} = queue:out(Queue),
     {stop, normal, ok, State};
 handle_call(close, From, State = #state{closing = undefined}) ->
     {noreply, State#state{closing = From}};
@@ -237,12 +281,21 @@ handle_cast(_Request, State) ->
 handle_info({read_complete, Reader, JobRef, Result},
             State = #state{busy = Busy}) ->
     case maps:find(Reader, Busy) of
-        {ok, {JobRef, ReplyTo}} ->
-            gen_server:reply(ReplyTo, Result),
-            maybe_finish_close(
-              reader_available(Reader,
-                               State#state{busy = maps:remove(Reader, Busy)}));
+        {ok, {JobRef, ReqRef}} ->
+            State1 = reply_request(ReqRef, Result,
+                                   State#state{busy = maps:remove(Reader, Busy)}),
+            maybe_finish_close(reader_available(Reader, State1));
         _ ->
+            {noreply, State}
+    end;
+handle_info({timeout, _TimerRef, {read_deadline, ReqRef}},
+            State = #state{pending = Pending}) ->
+    case maps:take(ReqRef, Pending) of
+        {{ReplyTo, _Timer, Kind}, Rest} ->
+            gen_server:reply(ReplyTo, {timeout, read_query}),
+            maybe_finish_close(forget_queued(
+                                 Kind, State#state{pending = Rest}));
+        error ->
             {noreply, State}
     end;
 handle_info({'EXIT', Reader, Reason}, State = #state{readers = Readers}) ->
@@ -287,55 +340,130 @@ start_readers(StorageRoot, DatabaseId, Count, Readers) ->
             {error, Reason}
     end.
 
-enqueue_read(_Sql, _Params, ReplyTo,
+enqueue_read(_Sql, _Params, ReplyTo, _Deadline,
              State = #state{closing = Closing}) when Closing =/= undefined ->
     gen_server:reply(ReplyTo, {error, owner_closing}),
     State;
-enqueue_read(Sql, Params, ReplyTo,
+enqueue_read(Sql, Params, ReplyTo, Deadline, State) ->
+    case expired(Deadline) of
+        true ->
+            gen_server:reply(ReplyTo, {timeout, read_query}),
+            State;
+        false -> enqueue_live_read(Sql, Params, ReplyTo, Deadline, State)
+    end.
+
+expired(infinity) -> false;
+expired(Deadline) -> erlang:monotonic_time(millisecond) >= Deadline.
+
+enqueue_live_read(Sql, Params, ReplyTo, Deadline,
              State = #state{available = [Reader | Rest], busy = Busy}) ->
+    ReqRef = make_ref(),
     JobRef = make_ref(),
     ok = erlite_sqlite_reader:query(Reader, Sql, Params, self(), JobRef),
-    State#state{available = Rest,
-                busy = Busy#{Reader => {JobRef, ReplyTo}}};
-enqueue_read(Sql, Params, ReplyTo,
-             State = #state{queue = Queue, queue_limit = Limit}) ->
-    case queue:len(Queue) < Limit of
-        true -> State#state{queue = queue:in({Sql, Params, ReplyTo}, Queue)};
+    track_request(ReqRef, ReplyTo, Deadline, busy,
+                  State#state{available = Rest,
+                              busy = Busy#{Reader => {JobRef, ReqRef}}});
+enqueue_live_read(Sql, Params, ReplyTo, Deadline,
+             State = #state{queue = Queue, queued = Queued,
+                            queue_limit = Limit}) ->
+    case Queued < Limit of
+        true ->
+            ReqRef = make_ref(),
+            track_request(ReqRef, ReplyTo, Deadline, queued,
+                          State#state{queue = queue:in(
+                                                {ReqRef, Sql, Params}, Queue),
+                                      queued = Queued + 1});
         false ->
             gen_server:reply(ReplyTo, {error, read_pool_overloaded}),
             State
     end.
 
-reader_available(Reader, State = #state{queue = Queue, busy = Busy}) ->
-    case queue:out(Queue) of
-        {{value, {Sql, Params, ReplyTo}}, Rest} ->
+track_request(ReqRef, ReplyTo, infinity, Kind,
+              State = #state{pending = Pending}) ->
+    State#state{pending = Pending#{ReqRef => {ReplyTo, none, Kind}}};
+track_request(ReqRef, ReplyTo, Deadline, Kind,
+              State = #state{pending = Pending}) ->
+    Timer = erlang:start_timer(remaining(Deadline), self(),
+                               {read_deadline, ReqRef}),
+    State#state{pending = Pending#{ReqRef => {ReplyTo, Timer, Kind}}}.
+
+reply_request(ReqRef, Result, State = #state{pending = Pending}) ->
+    case maps:take(ReqRef, Pending) of
+        {{ReplyTo, Timer, _Kind}, Rest} ->
+            cancel_deadline(Timer),
+            gen_server:reply(ReplyTo, Result),
+            State#state{pending = Rest};
+        error ->
+            State
+    end.
+
+cancel_deadline(none) -> ok;
+cancel_deadline(Timer) -> _ = erlang:cancel_timer(Timer), ok.
+
+%% Timed-out queued requests stay in the queue as stale entries and are skipped
+%% when reached. Compacting once stale entries exceed the limit keeps the queue
+%% bounded without an O(n) scan per timeout.
+forget_queued(busy, State) ->
+    State;
+forget_queued(queued, State = #state{queued = Queued, stale = Stale,
+                                     queue_limit = Limit}) ->
+    State1 = State#state{queued = Queued - 1, stale = Stale + 1},
+    case Stale + 1 > Limit of
+        true -> compact_queue(State1);
+        false -> State1
+    end.
+
+compact_queue(State = #state{queue = Queue, pending = Pending}) ->
+    Live = queue:filter(fun({ReqRef, _Sql, _Params}) ->
+                                maps:is_key(ReqRef, Pending)
+                        end, Queue),
+    State#state{queue = Live, stale = 0}.
+
+reader_available(Reader, State) ->
+    case next_live_read(State) of
+        {ok, {ReqRef, Sql, Params}, State1 = #state{busy = Busy}} ->
             JobRef = make_ref(),
-            ok = erlite_sqlite_reader:query(
-                   Reader, Sql, Params, self(), JobRef),
-            State#state{queue = Rest,
-                        busy = Busy#{Reader => {JobRef, ReplyTo}}};
-        {empty, _} ->
+            ok = erlite_sqlite_reader:query(Reader, Sql, Params, self(), JobRef),
+            State1#state{busy = Busy#{Reader => {JobRef, ReqRef}}};
+        none ->
             State#state{available = State#state.available ++ [Reader]}
+    end.
+
+next_live_read(State = #state{queue = Queue, pending = Pending}) ->
+    case queue:out(Queue) of
+        {empty, _} ->
+            none;
+        {{value, {ReqRef, Sql, Params}}, Rest} ->
+            case maps:find(ReqRef, Pending) of
+                {ok, {ReplyTo, Timer, queued}} ->
+                    {ok, {ReqRef, Sql, Params},
+                     State#state{queue = Rest,
+                                 pending = Pending#{ReqRef => {ReplyTo, Timer,
+                                                               busy}},
+                                 queued = State#state.queued - 1}};
+                error ->
+                    next_live_read(State#state{queue = Rest,
+                                               stale = State#state.stale - 1})
+            end
     end.
 
 maybe_finish_close(State = #state{closing = undefined}) ->
     {noreply, State};
 maybe_finish_close(State = #state{closing = CloseFrom, busy = Busy,
-                                  queue = Queue}) ->
-    case {map_size(Busy), queue:is_empty(Queue)} of
-        {0, true} ->
+                                  queued = Queued}) ->
+    case {map_size(Busy), Queued} of
+        {0, 0} ->
             gen_server:reply(CloseFrom, ok),
             {stop, normal, State#state{closing = undefined}};
         _ -> {noreply, State}
     end.
 
-reply_pending(Error, #state{busy = Busy, queue = Queue}) ->
-    lists:foreach(
-      fun({_Reader, {_JobRef, ReplyTo}}) -> gen_server:reply(ReplyTo, Error) end,
-      maps:to_list(Busy)),
-    lists:foreach(
-      fun({_Sql, _Params, ReplyTo}) -> gen_server:reply(ReplyTo, Error) end,
-      queue:to_list(Queue)).
+reply_pending(Error, #state{pending = Pending}) ->
+    maps:foreach(
+      fun(_ReqRef, {ReplyTo, Timer, _Kind}) ->
+              cancel_deadline(Timer),
+              gen_server:reply(ReplyTo, Error)
+      end, Pending).
 
 close_reader(Reader) ->
     try erlite_sqlite_reader:close(Reader)
