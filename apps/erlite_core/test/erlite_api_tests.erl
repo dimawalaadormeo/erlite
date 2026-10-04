@@ -143,7 +143,13 @@ tls_listener_requires_auth() ->
                         "not-a-header\r\n\r\n">>, 400),
         assert_status(Port,
                       <<"POST /v1/databases HTTP/1.1\r\nHost: localhost\r\n"
-                        "Transfer-Encoding: chunked\r\n\r\n">>, 400)
+                        "Transfer-Encoding: chunked\r\n\r\n">>, 400),
+        %% No catalog is configured here, so an unknown token is a server-side
+        %% unavailability (503), not an authentication failure (401).
+        assert_status(Port,
+                      <<"GET /v1/databases HTTP/1.1\r\nHost: localhost\r\n"
+                        "Authorization: Bearer 00000000000000000000000000000000\r\n"
+                        "Connection: close\r\n\r\n">>, 503)
     after
         gen_server:stop(Server),
         application:unset_env(erlite_core, api)

@@ -208,7 +208,7 @@ recv_body(Socket, Data, Length) ->
     end.
 
 dispatch(Socket, Method, Path, Headers, BodyBinary, Credentials) ->
-    case identity(Path, Headers, Credentials) of
+    case identity(Path, Headers, Credentials, Socket) of
         {ok, Identity} ->
             case decode_body(BodyBinary) of
                 {ok, Body} ->
@@ -217,20 +217,34 @@ dispatch(Socket, Method, Path, Headers, BodyBinary, Credentials) ->
                     send_response(Socket, Status, Response);
                 {error, _} -> send_response(Socket, 400, error_body(invalid_json))
             end;
-        {error, Reason} -> send_response(Socket, 401, error_body(Reason))
+        {error, Reason} -> send_response(Socket, status_for(Reason), error_body(Reason))
     end.
 
-identity(Path, _Headers, _Credentials) when Path =:= <<"/v1/health">>;
-                                           Path =:= <<"/v1/ready">> ->
+%% Refusals caused by load are not authentication failures, so they carry their
+%% own status: 429 for the per-source budget, 503 for shed or unavailable reads.
+status_for(rate_limited) -> 429;
+status_for(busy) -> 503;
+status_for(token_store_unavailable) -> 503;
+status_for(_) -> 401.
+
+identity(Path, _Headers, _Credentials, _Socket) when Path =:= <<"/v1/health">>;
+                                                    Path =:= <<"/v1/ready">> ->
     {ok, #{role => service, databases => []}};
-identity(_Path, Headers, Credentials) ->
+identity(_Path, Headers, Credentials, Socket) ->
     Token = case maps:get(<<"authorization">>, Headers, undefined) of
                 <<"Bearer ", Value/binary>> -> Value;
                 _ -> undefined
             end,
     case erlite_api_auth:authenticate(Token, Credentials) of
-        {error, invalid_bearer_token} -> erlite_api_tokens:identity(Token);
+        {error, invalid_bearer_token} -> erlite_api_tokens:identity(Token, peer(Socket));
         Other -> Other
+    end.
+
+%% The budget is per source address. An unknown peer shares one budget.
+peer(Socket) ->
+    case ssl:peername(Socket) of
+        {ok, {Address, _Port}} -> Address;
+        _ -> unknown
     end.
 
 decode_body(<<>>) -> {ok, #{}};

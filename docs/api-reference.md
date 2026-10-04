@@ -235,6 +235,20 @@ Authentication failures return `401`:
 - `invalid_credentials_config` — the server's credential configuration is
   malformed.
 
+Catalog-issued tokens that the node does not recognise are limited so that
+unknown tokens cannot drive consensus traffic:
+
+- `429 rate_limited` — the source address has used up its failed-lookup budget
+  (10 per second, with a global cap of 200 per second). Retry after a short
+  pause.
+- `503 busy` — the node is already running its maximum of 32 consistent token
+  reads. Retry shortly.
+- `503 token_store_unavailable` — the catalog could not confirm the token within
+  1 second, or the catalog is not configured.
+
+A valid token found on a catalog member's local replica does not use any of this
+budget. Only a token that the catalog confirms is invalid counts against it.
+
 Application-level authorization (which end user may see which row) is the
 application's responsibility. An Erlite token authorizes a *database*, not a
 user.
@@ -280,12 +294,13 @@ Match on the first element.
 | 200 | Success | — |
 | 400 | Malformed request, missing field, or rejected SQL/value | `invalid_request`, `invalid_json`, `["missing_field", Key]`, `unsafe_query`, `["sqlite_error", Code]`, `["unsupported_replicated_sql", Sql]`, `invalid_database_id` |
 | 401 | Missing or invalid bearer token | `missing_bearer_token`, `invalid_bearer_token` |
+| 429 | Too many failed token lookups from this source | `rate_limited` |
 | 403 | Token lacks the required role or database access | `admin_required`, `service_token_required`, `database_forbidden` |
 | 404 | Unknown route or database | `not_found`, `database_not_found` |
 | 409 | Conflict with current state | `database_exists`, `["database_not_ready", State]`, `["movement_in_progress", Op]`, `["repair_in_progress", Op]`, `["migration_in_progress", Campaign]`, `["transaction_id_conflict", Id]`, `["transaction_rejected", Id]`, `["schema_version_mismatch", Expected, Current]`, `["stale_generation", ...]` |
 | 413 | Request body too large | `request_too_large` |
 | 500 | Unexpected internal failure | `unexpected_result`, or an internal reason |
-| 503 | Readiness degraded, catalog not configured, or a temporary overload | `catalog_not_configured`, `read_pool_overloaded`, `["sqlite_error", 5]`, `["sqlite_error", 6]`, `["sqlite_error", 13]` (busy, locked, or full storage); `/v1/ready` returns the health object |
+| 503 | Readiness degraded, catalog not configured, or a temporary overload | `catalog_not_configured`, `token_store_unavailable`, `busy`, `read_pool_overloaded`, `["sqlite_error", 5]`, `["sqlite_error", 6]`, `["sqlite_error", 13]` (busy, locked, or full storage); `/v1/ready` returns the health object |
 | 504 | Operation timed out | `read_query`, or a write/control timeout reason |
 
 Two cases deserve care:

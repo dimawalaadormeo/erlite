@@ -177,6 +177,29 @@ therefore takes effect on a member once that member has applied it. The window i
 the replication lag, normally milliseconds. Within that window a lagging member can
 still accept a revoked token, but it never refuses a valid one.
 
+Once the token store is enabled, the catalog holds a durable protocol floor,
+`min_protocol`, which is 2. Every replica stores the same value. The floor is
+checked in four places: enablement refuses while any member, including one still
+joining or leaving, reports a stored release below the floor; `activate_node`
+refuses a joining member below the floor; `update_release` refuses a report below
+the floor; and `prepare_join` refuses a node below the floor. The live release
+check at enablement covers all members, not only active ones.
+
+The floor cannot stop code that is already running. An old binary that is
+already running, or was rolled back, neither runs these checks nor reports its
+release, so the catalog cannot prevent it from running. Until a live release audit
+exists, the rule is operational: never downgrade a node below the enabled floor.
+
+Unknown bearer tokens are limited so that they cannot drive consensus traffic. A
+token that the local replica does not recognise is admitted only within a
+per-source budget of 10 failed lookups per second, with a global cap of 200 per
+second. At most 32 consistent token reads run at once. A consistent read that does
+not complete within 1 second is refused, not retried. Only a confirmed invalid token
+is charged against the budget, and a valid token found on the local replica is
+never charged. A limiter that is not running refuses reads rather than allowing
+them. Refusals return `429 rate_limited`, or `503 busy`, or
+`503 token_store_unavailable`.
+
 ## Catalog-fenced database lifecycle
 
 Phase 5 database records are durable Ra machine state. Creation begins at generation one for a previously unknown ID. A tombstoned ID may be recreated only at exactly the following generation. The catalog accepts an identical retry of a transition, but a different operation ID at the same generation or any mismatched generation fails closed. Readiness can only follow `creating`; tombstoning can only follow `deleting` with the same operation ID and generation.

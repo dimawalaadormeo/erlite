@@ -2,8 +2,9 @@
 
 -export([issue_admin/1, rotate_admin/2, revoke_admin/1,
          issue_service/1, rotate_service/2, revoke_service/1,
-         revoke_database/1, enable/0, list/0, audit/0, identity/1]).
+         revoke_database/1, enable/0, list/0, audit/0, identity/2]).
 
+-define(NEGATIVE_TIMEOUT, 1000).
 -define(TIMEOUT, 5000).
 -define(TOKEN_BYTES, 32).
 -define(TOKEN_STORE_PROTOCOL, 2).
@@ -43,7 +44,7 @@ enable() ->
         {ok, Catalog} ->
             case erlite_catalog:status(Catalog, ?TIMEOUT, consistent) of
                 {ok, #{nodes := Nodes}} ->
-                    case check_live_releases([Node || #{state := active} = Node <- Nodes]) of
+                    case check_live_releases(Nodes) of
                         ok -> erlite_catalog:enable_token_store(Catalog, ?TIMEOUT);
                         Error -> Error
                     end;
@@ -90,22 +91,56 @@ list() ->
         Error -> Error
     end.
 
--spec identity(binary()) -> {ok, map()} | {error, term()}.
-identity(Token) when is_binary(Token) ->
+-spec identity(binary() | undefined, term()) -> {ok, map()} | {error, term()}.
+identity(undefined, _Source) -> {error, invalid_bearer_token};
+identity(Token, Source) when is_binary(Token) ->
     Hash = digest(Token),
     Now = erlang:system_time(millisecond),
     case local_identity(Hash, Now) of
         {ok, _} = Found -> Found;
         %% Only a positive local hit is trusted. A local miss may mean the token
         %% was issued elsewhere and is not applied here yet, so it is confirmed
-        %% by the consistent read, which is also the authority for refusals.
-        _ ->
-            case catalog() of
-                {ok, Catalog} ->
-                    identity_result(erlite_catalog:token_identity(
-                                      Catalog, Hash, Now, ?TIMEOUT));
-                _ -> {error, token_store_unavailable}
+        %% by a consistent read, which is also the authority for refusals.
+        _ -> confirm_with_catalog(Hash, Now, Source)
+    end.
+
+%% Budgeted and capped: a flood of unknown tokens is refused or shed without
+%% consensus traffic beyond the cap. Only a confirmed invalid token is charged.
+confirm_with_catalog(Hash, Now, Source) ->
+    case erlite_api_limiter:admit(Source) of
+        {error, rate_limited} = Limited ->
+            erlite_observability:record(api_token_rate_limited_total),
+            Limited;
+        {error, busy} = Busy ->
+            erlite_observability:record(api_token_read_busy_total),
+            Busy;
+        ok ->
+            case erlite_api_limiter:acquire_read() of
+                {error, busy} ->
+                    erlite_observability:record(api_token_read_busy_total),
+                    {error, busy};
+                ok ->
+                    Result = try consistent_identity(Hash, Now)
+                             after erlite_api_limiter:release_read()
+                             end,
+                    case Result of
+                        {error, invalid_bearer_token} ->
+                            ok = erlite_api_limiter:failed(Source);
+                        {error, token_store_unavailable} ->
+                            erlite_observability:record(api_token_catalog_unavailable_total);
+                        _ -> ok
+                    end,
+                    Result
             end
+    end.
+
+consistent_identity(Hash, Now) ->
+    erlite_observability:record(api_token_consistent_reads_total),
+    case catalog() of
+        {ok, Catalog} ->
+            identity_result(erlite_catalog:token_identity(
+                              Catalog, Hash, Now, ?NEGATIVE_TIMEOUT));
+        _ -> {error, token_store_unavailable}
     end.
 
 %% A catalog member answers from its own replica. A node that is not a member
