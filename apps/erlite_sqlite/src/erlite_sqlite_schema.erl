@@ -6,6 +6,10 @@
          reset_raft_history/1]).
 
 -define(FORMAT_VERSION, 1).
+%% Stored in the failure tables' sqlite_error column for replicated commands
+%% rejected because their declared schema version is not the replica's current
+%% version. The value is not a SQLite result code.
+-define(SCHEMA_VERSION_REJECTED, -1).
 
 -type apply_result() :: applied | already_applied | transaction_id_conflict |
                         transaction_failed | migration_failed.
@@ -193,8 +197,10 @@ apply_after_expected_index(Connection, ExpectedIndex, RaftIndex, TransactionId,
                 {ok, SchemaVersion} -> apply_transaction(
                                          Connection, RaftIndex, TransactionId,
                                          CommandHash, Statements);
-                {ok, Current} -> {error, {schema_version_mismatch,
-                                          SchemaVersion, Current}};
+                {ok, _Current} ->
+                    record_transaction_failure(Connection, RaftIndex,
+                                               TransactionId, CommandHash,
+                                               ?SCHEMA_VERSION_REJECTED);
                 Error -> Error
             end;
         {ok, CurrentIndex} ->
@@ -248,8 +254,9 @@ apply_valid_migration(Connection, ExpectedIndex, RaftIndex, Set, MigrationId,
                                       FromVersion, ToVersion}};
                 Error -> Error
             end;
-        {{ok, ExpectedIndex}, {ok, Current}} ->
-            {error, {schema_version_mismatch, FromVersion, Current}};
+        {{ok, ExpectedIndex}, {ok, _Current}} ->
+            record_migration_failure(Connection, RaftIndex, Set, MigrationId,
+                                     CommandHash, ?SCHEMA_VERSION_REJECTED);
         {{ok, Current}, _} ->
             {error, {raft_index_mismatch, ExpectedIndex, Current, RaftIndex}};
         {Error, _} -> Error

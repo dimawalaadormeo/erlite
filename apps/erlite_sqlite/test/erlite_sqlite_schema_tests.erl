@@ -168,11 +168,14 @@ migration_is_atomic_versioned_and_idempotent_test() ->
                        erlite_sqlite_schema:apply_migration(
                          Connection, 1, 2, <<"app">>, <<"one">>, Hash,
                          0, 1, Statements)),
-          ?assertEqual({error, {schema_version_mismatch, 0, 1}},
+          ?assertEqual({ok, transaction_failed},
                        erlite_sqlite_schema:apply_committed(
                          Connection, 2, 3, <<"old-client">>, hash(<<"tx">>),
                          0, [{execute, <<"INSERT INTO migrated VALUES (?)">>,
                               [1]}])),
+          ?assertEqual({ok, 3}, erlite_sqlite_schema:last_applied_index(Connection)),
+          ?assertEqual(rejected, erlite_sqlite_schema:transaction_status(
+                                   Connection, <<"old-client">>, hash(<<"tx">>))),
           ?assertMatch({ok, #{rows := [[<<"app">>, <<"one">>, 0, 1, 1]]}},
                        erlite_sqlite_schema:migration_history(Connection)),
           Connection

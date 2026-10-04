@@ -85,8 +85,11 @@ The Phase 13 failure matrix is in [`docs/hardening.md`](docs/hardening.md).
 - **Development:** [`ERLITE_PROJECT.md`](ERLITE_PROJECT.md),
   [`docs/architecture.md`](docs/architecture.md), and
   [`docs/correctness.md`](docs/correctness.md)
-- **Operations and API:** [`docs/user-guide.md`](docs/user-guide.md) and
-  [`docs/http-api.md`](docs/http-api.md)
+- **Operations and API:** [`docs/user-guide.md`](docs/user-guide.md) and the
+  complete HTTP API reference, [`docs/api-reference.md`](docs/api-reference.md),
+  which covers every endpoint, authentication, error codes, and guides with
+  working samples. [`docs/http-api.md`](docs/http-api.md) is the configuration
+  summary.
 
 ## Getting started
 
@@ -207,5 +210,5 @@ rebar3 escriptize
 ```
 
 The optional TLS HTTP/JSON service is documented in
-[`docs/http-api.md`](docs/http-api.md), with Python and PHP clients under
-[`examples/`](examples/).
+[`docs/api-reference.md`](docs/api-reference.md), with Python and PHP clients
+under [`examples/`](examples/).

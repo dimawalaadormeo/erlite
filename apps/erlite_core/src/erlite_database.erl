@@ -719,6 +719,7 @@ database_status(#{database_id := DatabaseId, mode := Mode,
     ReaderProcesses = sqlite_readers(Replicas),
     #{database_id => DatabaseId, mode => Mode,
       raft_members => length(ServerIds),
+      schema_version => replica_schema_version(Replicas),
       open_sqlite_replicas => map_size(Replicas),
       open_sqlite_readers => length(ReaderProcesses),
       controller_memory_bytes => process_memory(node(), self()),
@@ -736,6 +737,17 @@ database_status(#{database_id := DatabaseId, mode := Mode,
       sqlite_bytes => lists:sum(
                         [file_size(ServerId, Root, DatabaseId)
                          || {ServerId, Root} <- maps:to_list(Roots)])}.
+
+replica_schema_version(Replicas) ->
+    case maps:to_list(Replicas) of
+        [{ServerId, Owner} | _] ->
+            case member_call(ServerId, erlite_sqlite_owner, schema_version,
+                             [Owner]) of
+                {ok, Version} -> Version;
+                _ -> null
+            end;
+        [] -> null
+    end.
 
 sqlite_readers(Replicas) ->
     lists:append(
