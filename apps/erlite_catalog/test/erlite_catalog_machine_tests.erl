@@ -398,6 +398,100 @@ backup_descriptor(DatabaseId) ->
       sha256 => <<0:256>>, manifest_path => "/backups/test.manifest",
       source_server => {database_one1, node()}}.
 
+tokens_issue_rotate_revoke_and_expire_test() ->
+    State00 = catalog_state(),
+    {State0, ok} = erlite_catalog_machine:apply(#{index => 0}, enable_token_store, State00),
+    Key = {service, <<"merchant-1">>},
+    Old = binary:copy(<<1>>, 32),
+    New = binary:copy(<<2>>, 32),
+    {State1, ok} = erlite_catalog_machine:apply(#{index => 1},
+                                                {issue_token, Key, Old}, State0),
+    {_, {error, token_exists}} = erlite_catalog_machine:apply(
+                                        #{index => 2},
+                                        {issue_token, Key, Old}, State1),
+    {ok, {service, <<"merchant-1">>}} =
+        erlite_catalog_machine:token_identity(Old, 100, State1),
+    {State2, ok} = erlite_catalog_machine:apply(
+                     #{index => 3}, {rotate_token, Key, New, 200}, State1),
+    {ok, {service, <<"merchant-1">>}} =
+        erlite_catalog_machine:token_identity(Old, 150, State2),
+    {error, invalid_bearer_token} =
+        erlite_catalog_machine:token_identity(Old, 200, State2),
+    {ok, {service, <<"merchant-1">>}} =
+        erlite_catalog_machine:token_identity(New, 999, State2),
+    {State3, ok} = erlite_catalog_machine:apply(
+                     #{index => 4}, {rotate_token, Key, Old, 0}, State2),
+    {error, invalid_bearer_token} =
+        erlite_catalog_machine:token_identity(New, 0, State3),
+    {ok, {service, <<"merchant-1">>}} =
+        erlite_catalog_machine:token_identity(Old, 0, State3),
+    {State4, ok} = erlite_catalog_machine:apply(
+                     #{index => 5}, {revoke_token, Key}, State3),
+    {error, invalid_bearer_token} =
+        erlite_catalog_machine:token_identity(Old, 0, State4),
+    {_, {error, token_not_found}} = erlite_catalog_machine:apply(
+                                           #{index => 6},
+                                           {rotate_token, Key, New, 0}, State4),
+    {_, {error, invalid_token_request}} = erlite_catalog_machine:apply(
+                                                 #{index => 7},
+                                                 {issue_token, Key, <<"short">>},
+                                                 State4),
+    #{tokens := []} = erlite_catalog_machine:status(State4),
+    [#{operation := revoke, outcome := ok} | _] =
+        maps:get(audit, erlite_catalog_machine:status(State4)),
+    ok.
+
+token_store_gate_join_gate_and_audit_test() ->
+    State0 = catalog_state(),
+    Key = {service, <<"merchant-9">>},
+    Hash = binary:copy(<<7>>, 32),
+    {State1, {error, token_store_disabled}} = erlite_catalog_machine:apply(
+                                                #{index => 1, system_time => 1000},
+                                                {issue_token, Key, Hash}, State0),
+    {State2, ok} = erlite_catalog_machine:apply(
+                     #{index => 2, system_time => 2000}, enable_token_store, State1),
+    {State3, ok} = erlite_catalog_machine:apply(
+                     #{index => 3, system_time => 3000}, {issue_token, Key, Hash}, State2),
+    Audit = maps:get(audit, erlite_catalog_machine:status(State3)),
+    [#{operation := issue, time := 3000, index := 3, outcome := ok},
+     #{operation := enable_token_store, time := 2000, index := 2, outcome := ok},
+     #{operation := issue, time := 1000, index := 1,
+       outcome := {error, token_store_disabled}}] = Audit,
+    OldNode = #{node_id => <<9:128>>, node_name => <<"old">>,
+                server_id => {catalog_9, 'old@host'},
+                release => #{cluster_protocol => 1}},
+    NewNode = OldNode#{node_id => <<10:128>>, node_name => <<"new">>,
+                       server_id => {catalog_10, 'new@host'},
+                       release => #{cluster_protocol => 2}},
+    {_, ok} = erlite_catalog_machine:apply(#{index => 5}, {prepare_join, OldNode}, State0),
+    {_, {error, cluster_protocol_too_old_for_token_store}} =
+        erlite_catalog_machine:apply(#{index => 6}, {prepare_join, OldNode}, State2),
+    {_, ok} = erlite_catalog_machine:apply(#{index => 7}, {prepare_join, NewNode}, State2),
+    ok.
+
+update_release_records_the_running_release_test() ->
+    State00 = catalog_state(),
+    [NodeId | _] = maps:keys(maps:get(nodes, State00)),
+    Nodes00 = maps:get(nodes, State00),
+    Record = maps:get(NodeId, Nodes00),
+    State0 = State00#{nodes => Nodes00#{NodeId => Record#{
+                 server_id => {catalog_unique, 'unique@host'}}}},
+    {State1, ok} = erlite_catalog_machine:apply(
+                     #{index => 1},
+                     {update_release, 'unique@host', #{cluster_protocol => 2}}, State0),
+    #{release := #{cluster_protocol := 2}} =
+        maps:get(NodeId, maps:get(nodes, State1)),
+    {_, {error, node_not_found}} = erlite_catalog_machine:apply(
+                                     #{index => 2},
+                                     {update_release, 'nobody@host', #{}}, State0),
+    {_, {error, invalid_release}} = erlite_catalog_machine:apply(
+                                      #{index => 3},
+                                      {update_release, 'unique@host', no_map}, State0),
+    {_, {error, ambiguous_node}} = erlite_catalog_machine:apply(
+                                     #{index => 4},
+                                     {update_release, nonode@nohost, #{}}, State00),
+    ok.
+
 ready_database(DatabaseId, OperationId, Replicas) ->
     State0 = catalog_state(),
     {State1, ok} = erlite_catalog_machine:apply(

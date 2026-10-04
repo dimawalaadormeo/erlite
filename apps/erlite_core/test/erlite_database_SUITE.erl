@@ -7,6 +7,7 @@
          fleet_migration_failure_pauses_without_schema_advance/1,
          slow_read_does_not_occupy_database_controller/1,
          query_timeout_is_enforced_when_replicas_are_blocked/1,
+         api_tokens_issue_rotate_revoke_and_delete/1,
          external_api_query_transaction_and_control/1]).
 
 all() -> [multiple_database_lifecycle_and_isolation,
@@ -15,6 +16,7 @@ all() -> [multiple_database_lifecycle_and_isolation,
           fleet_migration_failure_pauses_without_schema_advance,
           slow_read_does_not_occupy_database_controller,
           query_timeout_is_enforced_when_replicas_are_blocked,
+          api_tokens_issue_rotate_revoke_and_delete,
           external_api_query_transaction_and_control].
 
 init_per_suite(Config) ->
@@ -120,6 +122,38 @@ fleet_migration_failure_pauses_without_schema_advance(Config) ->
     {ok, #{rows := [[1]]}} = erlite_databases:query(
                                DatabaseId, <<"SELECT 1">>, [], 15000),
     ok = erlite_database_lifecycle:delete(DatabaseId),
+    ok.
+
+api_tokens_issue_rotate_revoke_and_delete(_Config) ->
+    DatabaseId = <<"phase-api-tokens">>,
+    ok = erlite_database_lifecycle:create(DatabaseId),
+    {error, token_store_disabled} = erlite_api_tokens:issue_service(DatabaseId),
+    ok = erlite_api_tokens:enable(),
+    {ok, Old} = erlite_api_tokens:issue_service(DatabaseId),
+    {ok, #{role := service, databases := [DatabaseId]}} =
+        erlite_api_tokens:identity(Old),
+    {ok, New} = erlite_api_tokens:rotate_service(DatabaseId, 60000),
+    {ok, #{role := service}} = erlite_api_tokens:identity(Old),
+    {ok, #{role := service}} = erlite_api_tokens:identity(New),
+    {ok, Newest} = erlite_api_tokens:rotate_service(DatabaseId, 0),
+    {error, invalid_bearer_token} = erlite_api_tokens:identity(Old),
+    {error, invalid_bearer_token} = erlite_api_tokens:identity(New),
+    {ok, #{role := service}} = erlite_api_tokens:identity(Newest),
+    [#{kind := service, name := DatabaseId, rotating := false}] =
+        [T || T = #{name := N} <- erlite_api_tokens:list(),
+              N =:= DatabaseId],
+    {ok, Admin} = erlite_api_tokens:issue_admin(<<"ops-alice">>),
+    {ok, #{role := admin}} = erlite_api_tokens:identity(Admin),
+    ok = erlite_api_tokens:revoke_admin(<<"ops-alice">>),
+    {error, invalid_bearer_token} = erlite_api_tokens:identity(Admin),
+    ok = erlite_database_lifecycle:delete(DatabaseId),
+    {error, invalid_bearer_token} = erlite_api_tokens:identity(Newest),
+    Operations = [{Op, Outcome} || #{operation := Op, outcome := Outcome}
+                                       <- erlite_api_tokens:audit()],
+    true = lists:member({issue, ok}, Operations),
+    true = lists:member({rotate, ok}, Operations),
+    true = lists:member({revoke, ok}, Operations),
+    true = lists:member({enable_token_store, ok}, Operations),
     ok.
 
 slow_read_does_not_occupy_database_controller(_Config) ->
@@ -371,7 +405,7 @@ await_registry_restart(OldPid, Deadline, _Pid) ->
 
 catalog_nodes() ->
     [#{node_id => <<N:128>>, node_name => integer_to_binary(N),
-       server_id => ServerId}
+       server_id => ServerId, release => erlite_release:metadata()}
      || {N, ServerId} <- lists:zip([41, 42, 43], catalog_server_ids())].
 
 catalog_server_ids() ->

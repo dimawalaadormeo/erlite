@@ -25,7 +25,8 @@ authenticate_list(Token, [Credential | Rest]) ->
         false -> authenticate_list(Token, Rest)
     end.
 
-authorize(#{role := admin}, _Action, _DatabaseId) -> ok;
+authorize(#{role := admin}, control, _DatabaseId) -> ok;
+authorize(#{role := admin}, data, _DatabaseId) -> {error, service_token_required};
 authorize(#{role := service, databases := all}, data, _DatabaseId) -> ok;
 authorize(#{role := service, databases := Databases}, data, DatabaseId)
   when is_list(Databases) ->

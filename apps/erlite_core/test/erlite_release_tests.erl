@@ -8,7 +8,7 @@ current_release_is_self_compatible_test() ->
 
 rolling_upgrade_rejects_protocol_gap_test() ->
     Local = erlite_release:metadata(),
-    Future = Local#{cluster_protocol => 3, min_cluster_protocol => 2},
+    Future = Local#{cluster_protocol => 4, min_cluster_protocol => 3},
     ?assertEqual({error, incompatible_cluster_protocol},
                  erlite_release:compatible(Local, Future)).
 

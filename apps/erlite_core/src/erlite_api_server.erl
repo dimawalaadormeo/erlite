@@ -228,7 +228,10 @@ identity(_Path, Headers, Credentials) ->
                 <<"Bearer ", Value/binary>> -> Value;
                 _ -> undefined
             end,
-    erlite_api_auth:authenticate(Token, Credentials).
+    case erlite_api_auth:authenticate(Token, Credentials) of
+        {error, invalid_bearer_token} -> erlite_api_tokens:identity(Token);
+        Other -> Other
+    end.
 
 decode_body(<<>>) -> {ok, #{}};
 decode_body(Binary) ->

@@ -27,13 +27,18 @@ Configure the `erlite_core` application before it starts:
 ```
 
 Tokens shorter than 32 bytes or malformed credential records never
-authenticate. An admin identity can use control and data operations. A service
-identity can use data operations only for its configured database allow-list;
+authenticate. An admin identity can use control operations only and is refused
+for data operations. A service identity can use data operations only for its
+configured database allow-list;
 `databases => all` grants access to every database but still grants no control
 operations. Replacing the API configuration rotates credentials for new
 connections.
 
 ## Endpoints
+
+Tokens can also be issued, rotated, and revoked from an Erlang console with
+`erlite_api_tokens`. See the token management section of
+[`api-reference.md`](api-reference.md).
 
 - `GET /v1/health` — unauthenticated process health.
 - `GET /v1/ready` — unauthenticated worker and catalog-quorum readiness; returns

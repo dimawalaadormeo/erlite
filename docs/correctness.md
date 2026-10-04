@@ -151,6 +151,32 @@ activating or removing a file, then remove obsolete `-wal` and `-shm` sidecars.
 
 The initial active RF=3 resource budget enforced by Common Test is 256 KiB for the controller, 1.5 MiB across three SQLite owners, 3 MiB across three primary Ra server processes, and 384 KiB across three empty SQLite files. On OTP 29.0.3 in the test profile, the measured values were 42,424 bytes, 49,496 bytes, 147,716 bytes, and 49,152 bytes respectively. These are regression budgets for the measured primary processes, not final whole-VM capacity claims; Phase 14 remains responsible for large-scale validation including auxiliary Ra processes, ETS, timers, descriptors, and loaded-code sharing.
 
+## API token store
+
+Tokens managed by `erlite_api_tokens` are catalog commands. The catalog keeps
+SHA-256 digests with a role and scope: `admin` for a named operator, or `service`
+for one database. Issue, rotate, and revoke are replicated, so all catalog members
+agree on which tokens are valid. A rotation with a grace period keeps the previous
+digest valid until its expiry time; a zero grace period revokes it immediately.
+Deleting a database revokes its service token before the delete runs. Static
+configuration credentials remain valid during migration.
+
+Token commands are refused until `enable_token_store` is applied. Each node
+reports its running release to the catalog when it starts, and enabling asks every
+active node for its live release before the command is submitted. Enabling is
+refused unless every active node reports cluster protocol 2 or later,
+and once enabled the catalog refuses joins from nodes older than protocol 2. Every
+replica therefore applies the same token commands. Each token command appends an
+audit entry carrying the Raft command time, so all replicas record the same time.
+
+Token checks on an API request read the local catalog replica when the node is a
+catalog member, without a quorum round trip. Only a positive local hit is
+accepted. A local miss, a non-member node, or a timeout falls back to the
+consistent catalog read, which is the authority for refusals. A revocation
+therefore takes effect on a member once that member has applied it. The window is
+the replication lag, normally milliseconds. Within that window a lagging member can
+still accept a revoked token, but it never refuses a valid one.
+
 ## Catalog-fenced database lifecycle
 
 Phase 5 database records are durable Ra machine state. Creation begins at generation one for a previously unknown ID. A tombstoned ID may be recreated only at exactly the following generation. The catalog accepts an identical retry of a transition, but a different operation ID at the same generation or any mismatched generation fails closed. Readiness can only follow `creating`; tombstoning can only follow `deleting` with the same operation ID and generation.
@@ -300,8 +326,14 @@ back. Identical retries remain rejected and reuse of that ID with different
 content remains a conflict. For migration DDL, the equivalent failure record
 does not change user schema, successful migration history, or schema version.
 The request still returns failure and a failed fleet canary durably pauses.
-This prevents one rejected constraint or DDL command from poisoning all later
-Raft application. Resource, I/O, busy/locked, corruption, interruption, and
+A declared `schema_version` that differs from the replica's current version is
+handled the same way. A transaction is recorded under its transaction ID, and a
+migration with a mismatched `FromVersion` is recorded in the migration failures,
+both with the sentinel code `-1` (not a SQLite result code). The applied index
+advances, the schema does not change, and the replica keeps applying later
+commands. Before this rule, such an entry stopped application permanently.
+This prevents one rejected constraint, DDL, or version-mismatched command from
+poisoning all later Raft application. Resource, I/O, busy/locked, corruption, interruption, and
 allocation errors are different: Erlite does not record them as deterministic
 failures and never advances the applied index; application retries only after
 the underlying fault recovers.

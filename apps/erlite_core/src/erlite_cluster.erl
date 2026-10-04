@@ -1,6 +1,6 @@
 -module(erlite_cluster).
 
--export([init_cluster/1, join/3, leave/2, status/2]).
+-export([init_cluster/1, join/3, leave/2, status/2, catalog_server_id/0]).
 
 -spec init_cluster(erlite_cluster_config:config()) -> {ok, map()} | {error, term()}.
 init_cluster(Config = #{storage_path := Root, node_name := NodeName,

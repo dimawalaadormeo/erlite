@@ -1,7 +1,11 @@
 -module(erlite_catalog_machine).
+
+-define(AUDIT_LIMIT, 1000).
+-define(TOKEN_STORE_PROTOCOL, 2).
 -behaviour(ra_machine).
 
--export([init/1, apply/3, status/1, database/2, recoverable/1, campaign/2]).
+-export([init/1, apply/3, status/1, database/2, recoverable/1, campaign/2,
+         token_identity/3]).
 
 -type node_record() :: #{node_id := binary(),
                          node_name := binary(),
@@ -22,23 +26,13 @@ init(#{cluster_id := ClusterId, cluster_name := ClusterName,
       replication_factor => 3,
       quorum => 2,
       nodes => maps:from_list([{maps:get(node_id, Node), Node} || Node <- Nodes]),
-      databases => #{}, campaigns => #{}}.
+      databases => #{}, campaigns => #{}, tokens => #{},
+      token_store => false, audit => []}.
 
 -spec apply(map(), term(), state()) -> {state(), term()}.
 apply(_Meta, {prepare_join, Node0}, State = #{nodes := Nodes}) ->
     case valid_join_node(Node0) of
-        true ->
-            Node = Node0#{state => joining},
-            NodeId = maps:get(node_id, Node),
-            case maps:get(NodeId, Nodes, undefined) of
-                Existing when is_map(Existing) ->
-                    case same_identity(Existing, Node) of
-                        true -> {State, ok};
-                        false -> {State, {error, duplicate_node_id}}
-                    end;
-                undefined -> prepare_unique_join(Node, State);
-                _Other -> {State, {error, duplicate_node_id}}
-            end;
+        true -> join_when_allowed(Node0, Nodes, State);
         false -> {State, {error, invalid_node}}
     end;
 apply(_Meta, {activate_node, NodeId}, State = #{nodes := Nodes}) ->
@@ -130,8 +124,147 @@ apply(_Meta, {abort_database_migration, DatabaseId, CampaignId, MigrationId,
               Generation}, State) ->
     abort_database_migration(DatabaseId, CampaignId, MigrationId, Generation,
                              State);
+apply(Meta, {issue_token, Key, Hash}, State) ->
+    audited(Meta, issue, Key, issue_token(Key, Hash, State));
+apply(Meta, {rotate_token, Key, Hash, ExpiresAt}, State) ->
+    audited(Meta, rotate, Key, rotate_token(Key, Hash, ExpiresAt, State));
+apply(Meta, {revoke_token, Key}, State) ->
+    audited(Meta, revoke, Key, revoke_token(Key, State));
+apply(Meta, enable_token_store, State) ->
+    audited(Meta, enable_token_store, none, enable_token_store(State));
+apply(_Meta, {update_release, ErlangNode, Release}, State) ->
+    update_release(ErlangNode, Release, State);
 apply(_Meta, Command, State) ->
     {State, {error, {unsupported_catalog_command, Command}}}.
+
+%% Only SHA-256 digests of tokens are stored. A rotation keeps the previous
+%% digest valid until ExpiresAt; ExpiresAt 0 revokes it immediately.
+issue_token(_Key, _Hash, State = #{token_store := false}) ->
+    {State, {error, token_store_disabled}};
+issue_token(Key, Hash, State) ->
+    case valid_token_key(Key) andalso valid_token_hash(Hash) of
+        false -> {State, {error, invalid_token_request}};
+        true ->
+            Tokens = tokens(State),
+            case maps:is_key(Key, Tokens) of
+                true -> {State, {error, token_exists}};
+                false ->
+                    {State#{tokens => Tokens#{Key => #{hash => Hash,
+                                                       previous => undefined}}},
+                     ok}
+            end
+    end.
+
+rotate_token(_Key, _Hash, _ExpiresAt, State = #{token_store := false}) ->
+    {State, {error, token_store_disabled}};
+rotate_token(Key, Hash, ExpiresAt, State) ->
+    case valid_token_key(Key) andalso valid_token_hash(Hash) andalso
+         is_integer(ExpiresAt) andalso ExpiresAt >= 0 of
+        false -> {State, {error, invalid_token_request}};
+        true ->
+            Tokens = tokens(State),
+            case maps:find(Key, Tokens) of
+                {ok, #{hash := Current}} ->
+                    Previous = case ExpiresAt of
+                                   0 -> undefined;
+                                   _ -> #{hash => Current, expires_at => ExpiresAt}
+                               end,
+                    {State#{tokens => Tokens#{Key => #{hash => Hash,
+                                                       previous => Previous}}},
+                     ok};
+                error -> {State, {error, token_not_found}}
+            end
+    end.
+
+revoke_token(_Key, State = #{token_store := false}) ->
+    {State, {error, token_store_disabled}};
+revoke_token(Key, State) ->
+    {State#{tokens => maps:remove(Key, tokens(State))}, ok}.
+
+%% Enabling requires every active node to run a release that supports the token
+%% store. The API checks that before submitting, and prepare_join refuses older
+%% nodes once it is on, so every replica applies the same token commands.
+enable_token_store(State) ->
+    {State#{token_store => true}, ok}.
+
+%% A node reports the release it is running after it starts, so the stored
+%% record follows in-place upgrades.
+update_release(ErlangNode, Release, State = #{nodes := Nodes}) when is_map(Release) ->
+    case [NodeId || {NodeId, #{server_id := {_, Node}}} <- maps:to_list(Nodes),
+                    Node =:= ErlangNode] of
+        [NodeId] ->
+            Record = maps:get(NodeId, Nodes),
+            {State#{nodes => Nodes#{NodeId => Record#{release => Release}}}, ok};
+        [] -> {State, {error, node_not_found}};
+        _ -> {State, {error, ambiguous_node}}
+    end;
+update_release(_ErlangNode, _Release, State) ->
+    {State, {error, invalid_release}}.
+
+audited(Meta, Operation, Key, {State, Reply}) ->
+    Entry = #{index => maps:get(index, Meta, 0),
+              time => maps:get(system_time, Meta, 0),
+              operation => Operation,
+              key => audit_key(Key),
+              outcome => audit_outcome(Reply)},
+    {State#{audit => lists:sublist([Entry | maps:get(audit, State, [])],
+                                   ?AUDIT_LIMIT)}, Reply}.
+
+audit_key({Kind, Name}) -> {Kind, Name};
+audit_key(none) -> none.
+
+audit_outcome(ok) -> ok;
+audit_outcome({error, Reason}) -> {error, Reason}.
+
+-spec token_identity(binary(), integer(), state()) ->
+    {ok, {admin | service, all | binary()}} | {error, invalid_bearer_token}.
+token_identity(_Hash, _Now, #{token_store := false}) ->
+    {error, invalid_bearer_token};
+token_identity(Hash, Now, State) ->
+    Tokens = maps:to_list(tokens(State)),
+    case [Key || {Key, #{hash := H}} <- Tokens, H =:= Hash] of
+        [Key | _] -> {ok, token_scope(Key)};
+        [] ->
+            case [Key || {Key, #{previous := #{hash := H, expires_at := Expires}}}
+                             <- Tokens, H =:= Hash, Now < Expires] of
+                [Key | _] -> {ok, token_scope(Key)};
+                [] -> {error, invalid_bearer_token}
+            end
+    end.
+
+token_scope({admin, _Name}) -> {admin, all};
+token_scope({service, DatabaseId}) -> {service, DatabaseId}.
+
+valid_token_key({admin, Name}) when is_binary(Name), byte_size(Name) > 0 -> true;
+valid_token_key({service, DatabaseId})
+  when is_binary(DatabaseId), byte_size(DatabaseId) > 0 -> true;
+valid_token_key(_) -> false.
+
+valid_token_hash(Hash) when is_binary(Hash), byte_size(Hash) =:= 32 -> true;
+valid_token_hash(_) -> false.
+
+tokens(State) -> maps:get(tokens, State, #{}).
+
+token_store_allows_join(_Node, #{token_store := false}) -> true;
+token_store_allows_join(Node, _State) ->
+    maps:get(cluster_protocol, maps:get(release, Node, #{}), 0) >= ?TOKEN_STORE_PROTOCOL.
+
+join_when_allowed(Node0, Nodes, State) ->
+    case token_store_allows_join(Node0, State) of
+        false -> {State, {error, cluster_protocol_too_old_for_token_store}};
+        true ->
+            Node = Node0#{state => joining},
+            NodeId = maps:get(node_id, Node),
+            case maps:get(NodeId, Nodes, undefined) of
+                Existing when is_map(Existing) ->
+                    case same_identity(Existing, Node) of
+                        true -> {State, ok};
+                        false -> {State, {error, duplicate_node_id}}
+                    end;
+                undefined -> prepare_unique_join(Node, State);
+                _Other -> {State, {error, duplicate_node_id}}
+            end
+    end.
 
 create_migration_campaign(
   Campaign = #{campaign_id := Id, migration_set := Set,
@@ -854,10 +987,16 @@ placement_available(DatabaseId, Replicas, Databases, Nodes) ->
 -spec status(state()) -> map().
 status(State = #{nodes := Nodes}) ->
     Databases = maps:get(databases, State, #{}),
-    (maps:without([nodes, databases, campaigns], State))#{
+    (maps:without([nodes, databases, campaigns, tokens, audit], State))#{
+      audit => maps:get(audit, State, []),
       nodes => lists:sort(maps:values(Nodes)),
       databases => lists:sort(maps:values(Databases)),
-      campaigns => lists:sort(maps:values(maps:get(campaigns, State, #{})))}.
+      campaigns => lists:sort(maps:values(maps:get(campaigns, State, #{}))),
+      tokens => lists:sort([token_summary(Key, Entry)
+                            || {Key, Entry} <- maps:to_list(tokens(State))])}.
+
+token_summary({Kind, Name}, #{previous := Previous}) ->
+    #{kind => Kind, name => Name, rotating => Previous =/= undefined}.
 
 campaign(Id, State) ->
     case maps:find(Id, maps:get(campaigns, State, #{})) of

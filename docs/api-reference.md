@@ -129,20 +129,103 @@ endpoint requires a bearer token:
 Authorization: Bearer <token>
 ```
 
-Two identity roles exist:
+Each token has exactly one role, and a role does one kind of work. The two roles
+never overlap:
 
-| Role | Data operations | Control operations | Scope |
-| --- | --- | --- | --- |
-| `admin` | yes | yes | all databases |
-| `service` | yes | no | only databases in its `databases` list, or all with `databases => all` |
+| Role | Allowed | Refused |
+| --- | --- | --- |
+| `admin` | control operations: list the catalog, create and delete databases, read metrics | every data operation (status, query, transaction) |
+| `service` | data operations on the databases in its `databases` list, or all with `databases => all` | every control operation |
 
-Data operations are: reading status, consistent queries, and transactions.
-Control operations are: listing the catalog, creating and deleting databases,
-and metrics.
+Data operations are: reading database status, consistent queries, and
+transactions. Control operations are: listing the catalog, creating and deleting
+databases, and metrics.
+
+### Token separation
+
+Use a separate token for each job. A typical application needs two:
+
+1. An **admin token**, held by operators or provisioning tooling. It creates the
+   database and deletes it. It cannot read or write data.
+2. A **service token**, held by the application. It is scoped to the databases
+   the application uses. It cannot create or delete databases.
+
+Creating a database and then writing to it takes both tokens, in this order:
+
+```bash
+# 1. Admin token: create the database (control operation).
+curl -fsS --cacert ca.crt -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"database_id":"merchant-100"}' https://erlite.example:8443/v1/databases
+
+# 2. Service token scoped to merchant-100: write and read (data operations).
+curl -fsS --cacert ca.crt -H "Authorization: Bearer $SERVICE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"sql":"SELECT name FROM products"}' \
+  https://erlite.example:8443/v1/databases/merchant-100/query
+```
+
+### Managing tokens
+
+Tokens are issued, rotated, and revoked from an Erlang console on a cluster node.
+The token store must be enabled once per cluster, after every node has been
+upgraded (see [Rolling upgrades](#rolling-upgrades)):
+
+```erlang
+ok = erlite_api_tokens:enable().
+```
+
+Until then, token commands return `{error, token_store_disabled}`, and only
+static configuration credentials authenticate.
+They are stored in the replicated catalog as SHA-256 digests, so the server never
+holds a plaintext token after it is returned to you. A token is shown once, when
+it is issued or rotated.
+
+```erlang
+%% One named admin token per operator.
+{ok, AdminToken} = erlite_api_tokens:issue_admin(<<"ops-alice">>).
+
+%% One service token per database, for that application.
+{ok, ServiceToken} = erlite_api_tokens:issue_service(<<"merchant-100">>).
+
+%% Rotate with a 15-minute grace period: the old token keeps working until then.
+{ok, NewToken} = erlite_api_tokens:rotate_service(<<"merchant-100">>, 900000).
+
+%% Rotate with no grace period: the old token stops working at once.
+{ok, NewerToken} = erlite_api_tokens:rotate_service(<<"merchant-100">>, 0).
+
+ok = erlite_api_tokens:revoke_admin(<<"ops-alice">>).
+
+erlite_api_tokens:list().   %% names, kinds, and rotation state; never token values
+
+erlite_api_tokens:audit().  %% who-did-what history: operation, key, outcome, time
+```
+
+- Deleting a database revokes its service token before the database is removed.
+  If revocation fails, the delete does not run.
+- Every API request checks the catalog for tokens that are not in the static
+  configuration, so a revocation takes effect on the next request.
+- Credentials in the static `api` configuration still work during migration. They
+  will be removed once the catalog store is the only source.
+- Every issue, rotate, revoke, and enable is recorded in the audit history with
+  its Raft time and outcome. The history keeps the most recent 1000 entries and
+  never contains token values. It does not record which operator ran the command;
+  the entry shows the operation, the key, and the time only.
+- Each token check reads the catalog with a consistent query. A revoked token
+  stops working on the next request on every node.
+
+Using the wrong token fails with `403`:
+
+| Attempt | Result |
+| --- | --- |
+| Service token creates a database | `403 admin_required` |
+| Admin token runs a query or transaction | `403 service_token_required` |
+| Service token uses a database outside its list | `403 database_forbidden` |
 
 Authorization failures return `403` with one of these reasons:
 
 - `admin_required` — a control operation was attempted with a service token.
+- `service_token_required` — a data operation was attempted with an admin token.
 - `database_forbidden` — the token has no access to the requested database.
 
 Authentication failures return `401`:
@@ -197,7 +280,7 @@ Match on the first element.
 | 200 | Success | — |
 | 400 | Malformed request, missing field, or rejected SQL/value | `invalid_request`, `invalid_json`, `["missing_field", Key]`, `unsafe_query`, `["sqlite_error", Code]`, `["unsupported_replicated_sql", Sql]`, `invalid_database_id` |
 | 401 | Missing or invalid bearer token | `missing_bearer_token`, `invalid_bearer_token` |
-| 403 | Token lacks the required role or database access | `admin_required`, `database_forbidden` |
+| 403 | Token lacks the required role or database access | `admin_required`, `service_token_required`, `database_forbidden` |
 | 404 | Unknown route or database | `not_found`, `database_not_found` |
 | 409 | Conflict with current state | `database_exists`, `["database_not_ready", State]`, `["movement_in_progress", Op]`, `["repair_in_progress", Op]`, `["migration_in_progress", Campaign]`, `["transaction_id_conflict", Id]`, `["transaction_rejected", Id]`, `["schema_version_mismatch", Expected, Current]`, `["stale_generation", ...]` |
 | 413 | Request body too large | `request_too_large` |
@@ -228,10 +311,10 @@ Two cases deserve care:
 | GET | `/v1/metrics` | admin | Counters, VM pressure, database totals |
 | GET | `/v1/databases` | admin | Catalog status and database list |
 | POST | `/v1/databases` | admin | Create a database |
-| GET | `/v1/databases/{id}` | service or admin | Database status |
+| GET | `/v1/databases/{id}` | service (for its database) | Database status |
 | DELETE | `/v1/databases/{id}` | admin | Delete a database |
-| POST | `/v1/databases/{id}/query` | service or admin | Consistent read |
-| POST | `/v1/databases/{id}/transactions` | service or admin | Replicated write |
+| POST | `/v1/databases/{id}/query` | service (for its database) | Consistent read |
+| POST | `/v1/databases/{id}/transactions` | service (for its database) | Replicated write |
 
 ### GET /v1/health
 
@@ -317,7 +400,7 @@ database before physical replicas are created.
 
 ### GET /v1/databases/{id}
 
-Service (for its databases) or admin. Returns the database status as a `result`:
+Service token for that database. Returns the database status as a `result`:
 
 ```json
 {
@@ -360,7 +443,7 @@ is in progress for the database.
 
 ### POST /v1/databases/{id}/query
 
-Service (for its databases) or admin. Runs a single read-only `SELECT`. The read
+Service token for that database. Runs a single read-only `SELECT`. The read
 is *consistent*: it observes every write acknowledged before the request.
 
 Request:
@@ -404,7 +487,7 @@ Errors:
 
 ### POST /v1/databases/{id}/transactions
 
-Service (for its databases) or admin. Applies a group of statements as one
+Service token for that database. Applies a group of statements as one
 replicated write. All statements commit atomically or none does.
 
 Request:
@@ -459,7 +542,8 @@ Errors: `400 invalid_request` (malformed statement), `400 ["missing_field", Key]
 [safe retries](#guide-safe-retries)).
 
 Schema changes (`CREATE`, `ALTER`, `DROP`) are not accepted by `/transactions`.
-They use Erlang's migration interface, which advances `schema_version`.
+They use Erlang's migration interface, which advances `schema_version`. See
+[`migrations.md`](migrations.md).
 
 ---
 
@@ -571,6 +655,23 @@ Retry rules:
 
 ---
 
+## Rolling upgrades
+
+The token store needs cluster protocol 2. Upgrade nodes one at a time. Token management is not available until every
+active node runs protocol 2 or later, and the enable step checks this:
+
+1. Upgrade every node. Check that each one joins and reports the new release.
+2. Run `erlite_api_tokens:enable()`. Each node is asked directly which release it
+   runs. It refuses with `{nodes_below_token_store_protocol, Names}` if any active
+   node is older, and with `{nodes_unreachable, ...}` if a node cannot be asked.
+   A node reports its release to the catalog at every start, so the stored record
+   follows an in-place upgrade.
+3. After enabling, a node on an older release cannot join: the catalog refuses it
+   with `cluster_protocol_too_old_for_token_store`.
+
+Until step 2, static configuration credentials continue to work and tokens cannot
+be issued.
+
 ## 11. Guides
 
 ### Guide: first deployment check
@@ -581,10 +682,11 @@ so this guide assumes the database already has a `products` table.
 
 1. Confirm `GET /v1/health` returns `{"status":"ok"}`.
 2. Confirm `GET /v1/ready` returns `200` with `"catalog":"ready"`.
-3. As admin, `POST /v1/databases` for a test ID.
-4. As admin, `GET /v1/databases/{id}` and confirm `raft_members` is 3 and
-   read `schema_version`.
-5. Write with that `schema_version`, read the rows back, then delete the test database.
+3. Admin token: `POST /v1/databases` for a test ID.
+4. Service token scoped to that ID: `GET /v1/databases/{id}` and confirm
+   `raft_members` is 3 and read `schema_version`.
+5. Service token: write with that `schema_version` and read the rows back.
+6. Admin token: delete the test database.
 
 ```bash
 BASE=https://erlite.example:8443
@@ -597,15 +699,15 @@ curl -fsS --cacert "$CA" -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"database_id":"smoke-test"}' "$BASE/v1/databases"
 
-VERSION=$(curl -fsS --cacert "$CA" -H "Authorization: Bearer $ADMIN_TOKEN" \
+VERSION=$(curl -fsS --cacert "$CA" -H "Authorization: Bearer $SERVICE_TOKEN" \
   "$BASE/v1/databases/smoke-test" | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["schema_version"])')
 
-curl -fsS --cacert "$CA" -H "Authorization: Bearer $ADMIN_TOKEN" \
+curl -fsS --cacert "$CA" -H "Authorization: Bearer $SERVICE_TOKEN" \
   -H "Content-Type: application/json" \
   -d "{\"transaction_id\":\"smoke-1\",\"schema_version\":$VERSION,\"statements\":[{\"sql\":\"INSERT INTO products(sku,name) VALUES(?,?)\",\"params\":[\"ABC1\",\"Product\"]}]}" \
   "$BASE/v1/databases/smoke-test/transactions"
 
-curl -fsS --cacert "$CA" -H "Authorization: Bearer $ADMIN_TOKEN" \
+curl -fsS --cacert "$CA" -H "Authorization: Bearer $SERVICE_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"sql":"SELECT sku, name FROM products"}' "$BASE/v1/databases/smoke-test/query"
 

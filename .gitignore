@@ -1,3 +1,6 @@
 /_build/
 /erl_crash.dump
 
+
+# Local-only test scripts (not for commit)
+/scripts/local/

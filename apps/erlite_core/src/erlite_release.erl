@@ -6,7 +6,7 @@
 -export([set_test_metadata/1, clear_test_metadata/0]).
 -endif.
 
--define(CLUSTER_PROTOCOL, 1).
+-define(CLUSTER_PROTOCOL, 2).
 -define(MIN_CLUSTER_PROTOCOL, 1).
 -define(COMMAND_FORMAT, 1).
 -define(SNAPSHOT_FORMAT, 2).
