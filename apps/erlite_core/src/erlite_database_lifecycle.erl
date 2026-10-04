@@ -48,7 +48,10 @@ handle_call({configure, _CatalogServer, _StorageRoot}, _From, State) ->
 handle_call({create, DatabaseId}, _From, State) ->
     {reply, create_database(DatabaseId, State), State};
 handle_call({delete, DatabaseId}, _From, State) ->
-    {reply, delete_database(DatabaseId, State), State};
+    case erlite_api_tokens:revoke_database(DatabaseId) of
+        ok -> {reply, delete_database(DatabaseId, State), State};
+        Error -> {reply, Error, State}
+    end;
 handle_call({move, DatabaseId, Source, TargetNode}, _From, State) ->
     {reply, move_database(DatabaseId, Source, TargetNode, State), State};
 handle_call({backup, DatabaseId}, _From, State) ->

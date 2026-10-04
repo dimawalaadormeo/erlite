@@ -50,7 +50,7 @@ bootstrap_join_and_restart(Config) ->
     {ok, _} = rpc:call(Node1, erlite_cluster, init_cluster, [Config1]),
     Seed = {erlite_catalog, Node1},
     Release = rpc:call(Node1, erlite_release, metadata, []),
-    Future = Release#{cluster_protocol => 3, min_cluster_protocol => 2},
+    Future = Release#{cluster_protocol => 4, min_cluster_protocol => 3},
     ok = rpc:call(Node1, erlite_release, set_test_metadata, [Future]),
     {error, incompatible_cluster_protocol} =
         rpc:call(Node2, erlite_cluster, join, [Seed, Config2, 15000]),

@@ -153,7 +153,7 @@ parse_target(Text) ->
 
 catalog_nodes() ->
     [#{node_id => <<N:128>>, node_name => integer_to_binary(N),
-       server_id => ServerId}
+       server_id => ServerId, release => erlite_release:metadata()}
      || {N, ServerId} <- lists:zip([141, 142, 143], catalog_server_ids())].
 
 catalog_server_ids() ->

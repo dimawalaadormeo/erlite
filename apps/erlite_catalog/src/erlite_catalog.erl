@@ -4,6 +4,8 @@
          prepare_database_create/6, mark_database_ready/5,
          prepare_database_delete/5, tombstone_database/5,
          prepare_database_move/7, mark_database_replacement_ready/5,
+         issue_token/4, rotate_token/5, revoke_token/3, token_identity/4,
+         enable_token_store/2, update_release/4, token_identity_local/4,
          finish_database_move/5,
          prepare_database_restore/9, finish_database_restore/5,
          mark_database_under_replicated/7,
@@ -143,6 +145,32 @@ clear_stale_replica(ServerRef, DatabaseId, ServerId, StaleGeneration,
     command(ServerRef,
             {clear_stale_replica, DatabaseId, ServerId, StaleGeneration,
              Generation}, Timeout).
+
+issue_token(ServerRef, Key, Hash, Timeout) ->
+    command(ServerRef, {issue_token, Key, Hash}, Timeout).
+
+rotate_token(ServerRef, Key, Hash, ExpiresAt, Timeout) ->
+    command(ServerRef, {rotate_token, Key, Hash, ExpiresAt}, Timeout).
+
+revoke_token(ServerRef, Key, Timeout) ->
+    command(ServerRef, {revoke_token, Key}, Timeout).
+
+enable_token_store(ServerRef, Timeout) ->
+    command(ServerRef, enable_token_store, Timeout).
+
+%% Reads the replica on this node without a quorum round trip. A revocation is
+%% seen here once this replica has applied it.
+token_identity_local(ServerRef, Hash, Now, Timeout) ->
+    normalize_value_query(ra:local_query(
+      ServerRef, {erlite_catalog_machine, token_identity, [Hash, Now]}, Timeout)).
+
+update_release(ServerRef, ErlangNode, Release, Timeout) ->
+    command(ServerRef, {update_release, ErlangNode, Release}, Timeout).
+
+token_identity(ServerRef, Hash, Now, Timeout) ->
+    normalize_value_query(ra:consistent_query(
+      ServerRef, {erlite_catalog_machine, token_identity, [Hash, Now]},
+      Timeout)).
 
 create_migration_campaign(ServerRef, Campaign, Timeout) ->
     command(ServerRef, {create_migration_campaign, Campaign}, Timeout).

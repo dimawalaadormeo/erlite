@@ -46,7 +46,9 @@ call_query(DatabaseId, Sql, Params, Timeout) ->
     end.
 
 query_call(Pid, Request, Timeout) ->
-    try gen_server:call(Pid, Request, Timeout)
+    try gen_server:call(Pid, Request, Timeout) of
+        {timeout, _} -> {timeout, read_query};
+        Result -> Result
     catch
         exit:{timeout, _} -> {timeout, read_query};
         exit:Reason -> {error, {database_unavailable, Reason}}

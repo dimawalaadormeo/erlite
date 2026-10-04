@@ -16,12 +16,13 @@ authorization_is_database_scoped_test() ->
                  erlite_api_auth:authenticate(
                    <<"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx">>, Credentials)).
 
-admin_can_use_control_api_test() ->
+admin_token_is_control_only_test() ->
     Token = <<"abcdefghijklmnopqrstuvwxyzABCDEF">>,
     {ok, Identity} = erlite_api_auth:authenticate(
                        Token, [#{token => Token, role => admin}]),
     ?assertEqual(ok, erlite_api_auth:authorize(Identity, control, undefined)),
-    ?assertEqual(ok, erlite_api_auth:authorize(Identity, data, <<"any">>)).
+    ?assertEqual({error, service_token_required},
+                 erlite_api_auth:authorize(Identity, data, <<"any">>)).
 
 handler_rejects_service_control_and_bad_timeout_test() ->
     Service = #{role => service, databases => [<<"db">>]},

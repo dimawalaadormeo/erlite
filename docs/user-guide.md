@@ -177,10 +177,14 @@ The API is disabled by default and never exposes plaintext HTTP. Configure the
 ].
 ```
 
-Admin credentials can create, list, inspect, and delete databases and can use
-all data endpoints. Service credentials can only use data endpoints for their
-configured database allow-list. `databases => all` permits all databases but
-does not grant control operations. Store tokens outside source control and use
+Each credential has one role and is refused for work outside it. Admin
+credentials create, list, and delete databases and read metrics; they are
+refused for queries and transactions. Service credentials run queries and
+transactions only on their configured database allow-list; they are refused for
+control operations. `databases => all` permits all databases but does not grant
+control operations. Use one admin credential per operator for provisioning and one service credential
+per database for applications. Tokens issued from the Erlang console are kept in
+the catalog; see [`api-reference.md`](api-reference.md#managing-tokens). Store tokens outside source control and use
 certificates issued by a trusted PKI.
 
 Set these shell variables for the examples below:
@@ -263,7 +267,7 @@ curl --fail --cacert /path/to/ca.crt \
   -H "Content-Type: application/json" \
   -d '{
     "transaction_id":"sale-2026-000001",
-    "schema_version":0,
+    "schema_version":1,
     "statements":[
       {"sql":"INSERT INTO products(sku,name) VALUES(?,?)", "params":["A1","Widget"]}
     ],
@@ -271,6 +275,12 @@ curl --fail --cacert /path/to/ca.crt \
   }' \
   "$ERLITE_URL/v1/databases/merchant-100/transactions"
 ```
+
+`schema_version` must equal the database's current version, which
+`GET /v1/databases/{id}` returns as `schema_version`. A new database is at 0. A
+mismatch is durably rejected under that transaction ID, so resend with a new ID
+after reading the current version. Schema changes are not transactions; see
+[`migrations.md`](migrations.md).
 
 Transaction IDs provide idempotency. If a transaction times out, its commit
 outcome is ambiguous: retry with exactly the same transaction ID, schema
