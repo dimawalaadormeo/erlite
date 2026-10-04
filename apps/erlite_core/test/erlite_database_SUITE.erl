@@ -8,6 +8,7 @@
          slow_read_does_not_occupy_database_controller/1,
          query_timeout_is_enforced_when_replicas_are_blocked/1,
          api_tokens_issue_rotate_revoke_and_delete/1,
+         api_token_misses_are_budgeted/1,
          external_api_query_transaction_and_control/1]).
 
 all() -> [multiple_database_lifecycle_and_isolation,
@@ -17,6 +18,7 @@ all() -> [multiple_database_lifecycle_and_isolation,
           slow_read_does_not_occupy_database_controller,
           query_timeout_is_enforced_when_replicas_are_blocked,
           api_tokens_issue_rotate_revoke_and_delete,
+          api_token_misses_are_budgeted,
           external_api_query_transaction_and_control].
 
 init_per_suite(Config) ->
@@ -131,23 +133,23 @@ api_tokens_issue_rotate_revoke_and_delete(_Config) ->
     ok = erlite_api_tokens:enable(),
     {ok, Old} = erlite_api_tokens:issue_service(DatabaseId),
     {ok, #{role := service, databases := [DatabaseId]}} =
-        erlite_api_tokens:identity(Old),
+        erlite_api_tokens:identity(Old, make_ref()),
     {ok, New} = erlite_api_tokens:rotate_service(DatabaseId, 60000),
-    {ok, #{role := service}} = erlite_api_tokens:identity(Old),
-    {ok, #{role := service}} = erlite_api_tokens:identity(New),
+    {ok, #{role := service}} = erlite_api_tokens:identity(Old, make_ref()),
+    {ok, #{role := service}} = erlite_api_tokens:identity(New, make_ref()),
     {ok, Newest} = erlite_api_tokens:rotate_service(DatabaseId, 0),
-    {error, invalid_bearer_token} = erlite_api_tokens:identity(Old),
-    {error, invalid_bearer_token} = erlite_api_tokens:identity(New),
-    {ok, #{role := service}} = erlite_api_tokens:identity(Newest),
+    {error, invalid_bearer_token} = erlite_api_tokens:identity(Old, make_ref()),
+    {error, invalid_bearer_token} = erlite_api_tokens:identity(New, make_ref()),
+    {ok, #{role := service}} = erlite_api_tokens:identity(Newest, make_ref()),
     [#{kind := service, name := DatabaseId, rotating := false}] =
         [T || T = #{name := N} <- erlite_api_tokens:list(),
               N =:= DatabaseId],
     {ok, Admin} = erlite_api_tokens:issue_admin(<<"ops-alice">>),
-    {ok, #{role := admin}} = erlite_api_tokens:identity(Admin),
+    {ok, #{role := admin}} = erlite_api_tokens:identity(Admin, make_ref()),
     ok = erlite_api_tokens:revoke_admin(<<"ops-alice">>),
-    {error, invalid_bearer_token} = erlite_api_tokens:identity(Admin),
+    {error, invalid_bearer_token} = erlite_api_tokens:identity(Admin, make_ref()),
     ok = erlite_database_lifecycle:delete(DatabaseId),
-    {error, invalid_bearer_token} = erlite_api_tokens:identity(Newest),
+    {error, invalid_bearer_token} = erlite_api_tokens:identity(Newest, make_ref()),
     Operations = [{Op, Outcome} || #{operation := Op, outcome := Outcome}
                                        <- erlite_api_tokens:audit()],
     true = lists:member({issue, ok}, Operations),
@@ -267,6 +269,30 @@ catalog_lifecycle_reconciles_interrupted_work(Config) ->
                      undefined =:= ra_directory:where_is(default, Name)
              end, Replicas),
     ok = erlite_database_lifecycle:delete(DatabaseId),
+    ok.
+
+%% Unknown tokens are budgeted per source. Each admitted miss costs one consistent
+%% read, and the budget stops the rest without any catalog traffic. A valid token
+%% found on the local replica is still accepted from the same source.
+api_token_misses_are_budgeted(_Config) ->
+    ok = erlite_api_tokens:enable(),
+    Source = {198, 51, 100, 9},
+    {ok, Admin} = erlite_api_tokens:issue_admin(<<"budget-admin">>),
+    Reads = fun() -> maps:get(api_token_consistent_reads_total,
+                              maps:get(counters, erlite_observability:snapshot()), 0) end,
+    Before = Reads(),
+    Results = [erlite_api_tokens:identity(
+                 binary:encode_hex(crypto:strong_rand_bytes(32)), Source)
+               || _ <- lists:seq(1, 30)],
+    Invalid = length([R || R = {error, invalid_bearer_token} <- Results]),
+    Limited = length([R || R = {error, rate_limited} <- Results]),
+    30 = Invalid + Limited,
+    true = Invalid >= 10 andalso Invalid =< 11,
+    %% Each admitted miss performed exactly one consistent read.
+    Invalid = Reads() - Before,
+    {ok, #{role := admin}} = erlite_api_tokens:identity(Admin, {198, 51, 100, 10}),
+    {error, rate_limited} = erlite_api_tokens:identity(
+                              binary:encode_hex(crypto:strong_rand_bytes(32)), Source),
     ok.
 
 external_api_query_transaction_and_control(_Config) ->

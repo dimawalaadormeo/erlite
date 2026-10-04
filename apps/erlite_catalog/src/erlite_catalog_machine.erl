@@ -39,7 +39,11 @@ apply(_Meta, {activate_node, NodeId}, State = #{nodes := Nodes}) ->
     case maps:get(NodeId, Nodes, undefined) of
         #{state := active} -> {State, ok};
         Node = #{state := joining} ->
-            {State#{nodes => Nodes#{NodeId => Node#{state => active}}}, ok};
+            case meets_token_floor(Node, State) of
+                true ->
+                    {State#{nodes => Nodes#{NodeId => Node#{state => active}}}, ok};
+                false -> {State, {error, cluster_protocol_too_old_for_token_store}}
+            end;
         undefined -> {State, {error, node_not_found}};
         #{state := leaving} -> {State, {error, node_is_leaving}}
     end;
@@ -184,8 +188,18 @@ revoke_token(Key, State) ->
 %% Enabling requires every active node to run a release that supports the token
 %% store. The API checks that before submitting, and prepare_join refuses older
 %% nodes once it is on, so every replica applies the same token commands.
-enable_token_store(State) ->
-    {State#{token_store => true}, ok}.
+%% Enabling is refused while any member, including one still joining or
+%% leaving, has a stored release below the token-store protocol. The floor is
+%% kept in the replicated state, so later activation and release updates are
+%% checked against the same value on every replica.
+enable_token_store(State = #{nodes := Nodes}) ->
+    Below = [maps:get(node_id, Node) || Node <- maps:values(Nodes),
+                                        not meets_token_floor(Node,
+                                              #{min_protocol => ?TOKEN_STORE_PROTOCOL})],
+    case Below of
+        [] -> {State#{token_store => true, min_protocol => ?TOKEN_STORE_PROTOCOL}, ok};
+        _ -> {State, {error, {nodes_below_token_store_protocol, lists:sort(Below)}}}
+    end.
 
 %% A node reports the release it is running after it starts, so the stored
 %% record follows in-place upgrades.
@@ -194,7 +208,11 @@ update_release(ErlangNode, Release, State = #{nodes := Nodes}) when is_map(Relea
                     Node =:= ErlangNode] of
         [NodeId] ->
             Record = maps:get(NodeId, Nodes),
-            {State#{nodes => Nodes#{NodeId => Record#{release => Release}}}, ok};
+            case meets_token_floor(Record#{release => Release}, State) of
+                true ->
+                    {State#{nodes => Nodes#{NodeId => Record#{release => Release}}}, ok};
+                false -> {State, {error, cluster_protocol_too_old_for_token_store}}
+            end;
         [] -> {State, {error, node_not_found}};
         _ -> {State, {error, ambiguous_node}}
     end;
@@ -245,12 +263,14 @@ valid_token_hash(_) -> false.
 
 tokens(State) -> maps:get(tokens, State, #{}).
 
-token_store_allows_join(_Node, #{token_store := false}) -> true;
-token_store_allows_join(Node, _State) ->
-    maps:get(cluster_protocol, maps:get(release, Node, #{}), 0) >= ?TOKEN_STORE_PROTOCOL.
+%% Before enablement no floor applies. Afterwards the durable floor applies to
+%% every transition that makes or keeps a node a member.
+meets_token_floor(Node, State) ->
+    Floor = maps:get(min_protocol, State, 0),
+    maps:get(cluster_protocol, maps:get(release, Node, #{}), 0) >= Floor.
 
 join_when_allowed(Node0, Nodes, State) ->
-    case token_store_allows_join(Node0, State) of
+    case meets_token_floor(Node0, State) of
         false -> {State, {error, cluster_protocol_too_old_for_token_store}};
         true ->
             Node = Node0#{state => joining},

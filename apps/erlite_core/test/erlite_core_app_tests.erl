@@ -6,7 +6,7 @@ supervisor_starts_database_lifecycle_children_test() ->
     {ok, Pid} = erlite_core_sup:start_link(),
     unlink(Pid),
     Children = supervisor:which_children(Pid),
-    ?assertEqual([erlite_api_server, erlite_database_lifecycle,
+    ?assertEqual([erlite_api_limiter, erlite_api_server, erlite_database_lifecycle,
                   erlite_database_router, erlite_database_sup,
                   erlite_databases, erlite_fleet_migrations,
                   erlite_observability, erlite_rebalancer,

@@ -513,6 +513,64 @@ database_replicas(Prefix) ->
       node()} || N <- [1, 2, 3]].
 
 catalog_nodes() ->
+    %% Members report a release, as they do after startup. Enabling the token
+    %% store requires every member to report protocol 2 or later.
     [#{node_id => <<N:128>>, node_name => integer_to_binary(N),
-       server_id => {list_to_atom("catalog_" ++ integer_to_list(N)), node()}}
+       server_id => {list_to_atom("catalog_" ++ integer_to_list(N)), node()},
+       release => #{cluster_protocol => 2}}
      || N <- [1, 2, 3]].
+
+%% A protocol-1 member that is still joining when enable runs must block enable.
+%% Otherwise it could be activated after enablement without a release check.
+enable_refuses_joining_member_below_floor_test() ->
+    State0 = catalog_state(),
+    Old = #{node_id => <<9:128>>, node_name => <<"9">>,
+            server_id => {catalog_9, 'erlite9@test'},
+            release => #{cluster_protocol => 1}},
+    {State1, ok} = erlite_catalog_machine:apply(#{index => 1}, {prepare_join, Old}, State0),
+    %% The refusal is audited, so compare the reply and the flag, not the whole state.
+    {Refused, {error, {nodes_below_token_store_protocol, [<<9:128>>]}}} =
+        erlite_catalog_machine:apply(#{index => 2}, enable_token_store, State1),
+    ?assertEqual(false, maps:get(token_store, Refused, false)),
+    %% After the node reports protocol 2, enable succeeds and the floor is durable.
+    {State2, ok} = erlite_catalog_machine:apply(
+                     #{index => 3}, {update_release, 'erlite9@test', #{cluster_protocol => 2}},
+                     State1),
+    {State3, ok} = erlite_catalog_machine:apply(#{index => 4}, enable_token_store, State2),
+    ?assertEqual(2, maps:get(min_protocol, State3)),
+    {State4, ok} = erlite_catalog_machine:apply(#{index => 5}, {activate_node, <<9:128>>},
+                                                State3),
+    ?assertMatch(#{state := active}, maps:get(<<9:128>>, maps:get(nodes, State4))).
+
+%% Activation re-checks the release, so a joining record below the floor is refused.
+activation_refuses_member_below_floor_test() ->
+    State0 = catalog_state(),
+    {State1, ok} = erlite_catalog_machine:apply(#{index => 1}, enable_token_store, State0),
+    Below = #{node_id => <<8:128>>, node_name => <<"8">>,
+              server_id => {catalog_8, node()},
+              state => joining, release => #{cluster_protocol => 1}},
+    State2 = State1#{nodes => (maps:get(nodes, State1))#{<<8:128>> => Below}},
+    ?assertEqual({State2, {error, cluster_protocol_too_old_for_token_store}},
+                 erlite_catalog_machine:apply(#{index => 2}, {activate_node, <<8:128>>},
+                                              State2)).
+
+%% A release report below the floor is refused and leaves the stored record unchanged.
+update_release_refused_below_floor_after_enable_test() ->
+    State0 = catalog_state_with_erlang_nodes(),
+    {State1, ok} = erlite_catalog_machine:apply(#{index => 1}, enable_token_store, State0),
+    {State2, {error, cluster_protocol_too_old_for_token_store}} =
+        erlite_catalog_machine:apply(#{index => 2},
+                                     {update_release, 'erlite1@test', #{cluster_protocol => 1}},
+                                     State1),
+    ?assertEqual(State1, State2).
+
+
+%% The fixture nodes use distinct Erlang node names so release reports match one member.
+catalog_state_with_erlang_nodes() ->
+    Nodes = [#{node_id => <<N:128>>, node_name => integer_to_binary(N),
+               server_id => {list_to_atom("catalog_" ++ integer_to_list(N)),
+                             list_to_atom("erlite" ++ integer_to_list(N) ++ "@test")},
+               state => active, release => #{cluster_protocol => 2}}
+             || N <- [1, 2, 3]],
+    erlite_catalog_machine:init(#{cluster_id => <<0:128>>, cluster_name => <<"test">>,
+                                  nodes => Nodes}).
