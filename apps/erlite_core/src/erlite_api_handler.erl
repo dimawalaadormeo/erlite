@@ -1,6 +1,9 @@
 -module(erlite_api_handler).
 
 -export([handle/4]).
+-ifdef(TEST).
+-export([json_value/1, error_status/1, sqlite_status/1]).
+-endif.
 
 -define(DEFAULT_TIMEOUT, 15000).
 -define(MAX_TIMEOUT, 60000).
@@ -141,8 +144,16 @@ result({ok, Value}) -> {200, #{<<"result">> => json_value(Value)}};
 result({timeout, Reason}) -> response(504, Reason);
 result({error, database_not_found}) -> response(404, database_not_found);
 result({error, database_exists}) -> response(409, database_exists);
+result({error, Code}) when is_integer(Code) ->
+    response(sqlite_status(Code), [sqlite_error, Code]);
 result({error, Reason}) -> response(error_status(Reason), Reason);
 result(Other) -> response(500, {unexpected_result, Other}).
+
+%% SQLite result codes: 1 is a statement error, 5/6/13 are busy, locked, or
+%% full storage, which clients should retry later.
+sqlite_status(1) -> 400;
+sqlite_status(Code) when Code =:= 5; Code =:= 6; Code =:= 13 -> 503;
+sqlite_status(_) -> 500.
 
 error_status({stale_generation, _, _}) -> 409;
 error_status({movement_in_progress, _}) -> 409;
@@ -151,6 +162,14 @@ error_status({migration_in_progress, _}) -> 409;
 error_status({database_not_ready, _}) -> 409;
 error_status(transaction_id_conflict) -> 409;
 error_status(migration_id_conflict) -> 409;
+error_status({transaction_id_conflict, _}) -> 409;
+error_status({transaction_rejected, _}) -> 409;
+error_status({schema_version_mismatch, _, _}) -> 409;
+error_status({migration_id_conflict, _, _}) -> 409;
+error_status({unsupported_replicated_sql, _}) -> 400;
+error_status({invalid_replicated_statement, _}) -> 400;
+error_status({invalid_migration_statement, _}) -> 400;
+error_status(read_pool_overloaded) -> 503;
 error_status(Reason) when Reason =:= invalid_database_id;
                           Reason =:= invalid_database_options;
                           Reason =:= invalid_database_operation;
@@ -162,8 +181,13 @@ error_status(_) -> 500.
 response(Status, Reason) ->
     {Status, #{<<"error">> => json_value(Reason)}}.
 
-json_value(Value) when is_binary(Value); is_integer(Value); is_float(Value);
-                            Value =:= true; Value =:= false; Value =:= null -> Value;
+json_value(Value) when is_binary(Value) ->
+    case unicode:characters_to_binary(Value) of
+        Valid when is_binary(Valid) -> Valid;
+        _ -> binary:encode_hex(Value, lowercase)
+    end;
+json_value(Value) when is_integer(Value); is_float(Value);
+                       Value =:= true; Value =:= false; Value =:= null -> Value;
 json_value(Value) when is_atom(Value) -> atom_to_binary(Value);
 json_value(Value) when is_tuple(Value) ->
     [json_value(Item) || Item <- tuple_to_list(Value)];

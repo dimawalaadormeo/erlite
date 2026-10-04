@@ -55,6 +55,23 @@ query_policy_is_read_only_and_hides_internal_tables_test() ->
                        <<"SELECT created_at FROM audit_log "
                          "WHERE note = 'delete from products'">>)).
 
+api_status_and_encoding_reflect_client_errors_test() ->
+    ?assertEqual(409, erlite_api_handler:error_status(
+                        {transaction_rejected, <<"tx">>})),
+    ?assertEqual(409, erlite_api_handler:error_status(
+                        {transaction_id_conflict, <<"tx">>})),
+    ?assertEqual(409, erlite_api_handler:error_status(
+                        {schema_version_mismatch, 0, 1})),
+    ?assertEqual(400, erlite_api_handler:error_status(
+                        {unsupported_replicated_sql, <<"DROP">>})),
+    ?assertEqual(503, erlite_api_handler:error_status(read_pool_overloaded)),
+    ?assertEqual(400, erlite_api_handler:sqlite_status(1)),
+    ?assertEqual(503, erlite_api_handler:sqlite_status(5)),
+    ?assertEqual(500, erlite_api_handler:sqlite_status(11)),
+    ?assertEqual(<<"ok">>, erlite_api_handler:json_value(<<"ok">>)),
+    ?assertEqual(<<"0019ff">>,
+                 erlite_api_handler:json_value(<<0, 25, 255>>)).
+
 readiness_metrics_and_malformed_body_are_observed_test() ->
     {Pid, Owned} = ensure_observability(),
     try

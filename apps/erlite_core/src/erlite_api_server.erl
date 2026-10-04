@@ -220,7 +220,8 @@ dispatch(Socket, Method, Path, Headers, BodyBinary, Credentials) ->
         {error, Reason} -> send_response(Socket, 401, error_body(Reason))
     end.
 
-identity(<<"/v1/health">>, _Headers, _Credentials) ->
+identity(Path, _Headers, _Credentials) when Path =:= <<"/v1/health">>;
+                                           Path =:= <<"/v1/ready">> ->
     {ok, #{role => service, databases => []}};
 identity(_Path, Headers, Credentials) ->
     Token = case maps:get(<<"authorization">>, Headers, undefined) of

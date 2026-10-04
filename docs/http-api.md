@@ -1,5 +1,9 @@
 # Erlite HTTP API
 
+The complete endpoint reference, error codes, and sample guides are in
+[`api-reference.md`](api-reference.md). This page summarizes configuration and
+security expectations.
+
 Phase 6 provides a TLS-only HTTP/1.1 JSON service. The listener is disabled
 unless explicitly configured. Requests other than `GET /v1/health` and
 `GET /v1/ready` require an
